@@ -17,6 +17,7 @@ local FLOOR_SIZE = Vector3.new(160, 2, 160)
 
 local builtSpawn: SpawnLocation? = nil
 local builtQueuePad: BasePart? = nil
+local leaderboardLabel: TextLabel? = nil
 
 function LoungeBuilder.getSpawnCFrame(): CFrame
 	if builtSpawn then
@@ -108,8 +109,63 @@ function LoungeBuilder.build(): Folder
 	padLabel.TextScaled = true
 	padLabel.Parent = padGui
 
+	-- 글로벌 순위 전광판
+	local board = Instance.new("Part")
+	board.Name = "LeaderboardBoard"
+	board.Anchored = true
+	board.Size = Vector3.new(2, 30, 44)
+	board.Position = LOUNGE_ORIGIN + Vector3.new(0, 16, -half + 2)
+	board.Material = Enum.Material.SmoothPlastic
+	board.Color = Color3.fromRGB(18, 20, 28)
+	board.Parent = folder
+
+	local boardGui = Instance.new("SurfaceGui")
+	boardGui.Face = Enum.NormalId.Front
+	boardGui.CanvasSize = Vector2.new(440, 300)
+	boardGui.Parent = board
+
+	local title = Instance.new("TextLabel")
+	title.Size = UDim2.new(1, 0, 0, 50)
+	title.BackgroundTransparency = 1
+	title.Text = "🏆 글로벌 최고 기록"
+	title.TextColor3 = Color3.fromRGB(245, 220, 90)
+	title.Font = Enum.Font.GothamBold
+	title.TextScaled = true
+	title.Parent = boardGui
+
+	local body = Instance.new("TextLabel")
+	body.Size = UDim2.new(1, -20, 1, -60)
+	body.Position = UDim2.new(0, 10, 0, 56)
+	body.BackgroundTransparency = 1
+	body.Text = "기록을 불러오는 중..."
+	body.TextColor3 = Color3.fromRGB(230, 235, 245)
+	body.Font = Enum.Font.GothamMedium
+	body.TextXAlignment = Enum.TextXAlignment.Left
+	body.TextYAlignment = Enum.TextYAlignment.Top
+	body.TextScaled = false
+	body.TextSize = 22
+	body.Parent = boardGui
+	leaderboardLabel = body
+
 	folder.Parent = workspace
 	return folder
+end
+
+-- 전광판 텍스트 갱신 (Main의 주기 루프에서 호출)
+function LoungeBuilder.updateLeaderboard(entries: { { rank: number, name: string, time: number } })
+	if not leaderboardLabel then
+		return
+	end
+	if #entries == 0 then
+		leaderboardLabel.Text = "아직 기록이 없습니다.\n첫 번째 챔피언이 되어보세요!"
+		return
+	end
+	local lines = {}
+	for _, e in ipairs(entries) do
+		local medal = e.rank == 1 and "🥇" or (e.rank == 2 and "🥈" or (e.rank == 3 and "🥉" or (" " .. e.rank .. ".")))
+		lines[#lines + 1] = ("%s  %-12s  %.2f초"):format(medal, string.sub(e.name, 1, 12), e.time)
+	end
+	leaderboardLabel.Text = table.concat(lines, "\n")
 end
 
 return LoungeBuilder

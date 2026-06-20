@@ -546,7 +546,7 @@ end)
 -- =====================================================================
 local queueStatus = make("TextLabel", {
 	Size = UDim2.new(0, 280, 0, 40),
-	Position = UDim2.new(1, -296, 0, 140),
+	Position = UDim2.new(1, -296, 0, 208),
 	BackgroundColor3 = Color3.fromRGB(25, 28, 38),
 	BackgroundTransparency = 0.15,
 	Text = "",
@@ -644,6 +644,308 @@ local function showResults(results: { any })
 end
 
 -- =====================================================================
+-- 미니맵 (트랙 외곽선 + 차량 점)
+-- =====================================================================
+local MINIMAP_SIZE = 220
+local minimap = make("Frame", {
+	Size = UDim2.new(0, MINIMAP_SIZE, 0, MINIMAP_SIZE),
+	Position = UDim2.new(0, 16, 1, -MINIMAP_SIZE - 16),
+	BackgroundColor3 = Color3.fromRGB(15, 18, 26),
+	BackgroundTransparency = 0.2,
+	Visible = false,
+}, gui)
+corner(10, minimap)
+make("UIStroke", { Color = Color3.fromRGB(80, 90, 110), Thickness = 2 }, minimap)
+
+local minimapInner = make("Frame", {
+	Size = UDim2.new(1, -16, 1, -16),
+	Position = UDim2.new(0, 8, 0, 8),
+	BackgroundTransparency = 1,
+}, minimap)
+
+-- 월드 좌표 → 미니맵 로컬 비율 변환 상태
+local mapBounds: any = nil
+local outlineDots: { Frame } = {}
+local carDots: { [number]: Frame } = {}
+
+local function worldToMap(x: number, z: number): (number, number)
+	if not mapBounds then
+		return 0.5, 0.5
+	end
+	local spanX = math.max(mapBounds.maxX - mapBounds.minX, 1)
+	local spanZ = math.max(mapBounds.maxZ - mapBounds.minZ, 1)
+	-- 여백 10%
+	local u = 0.1 + 0.8 * ((x - mapBounds.minX) / spanX)
+	local v = 0.1 + 0.8 * ((z - mapBounds.minZ) / spanZ)
+	return u, v
+end
+
+local function buildMinimapOutline(path: { any }, bounds: any)
+	mapBounds = bounds
+	for _, d in ipairs(outlineDots) do
+		d:Destroy()
+	end
+	table.clear(outlineDots)
+	for _, p in ipairs(path) do
+		local u, v = worldToMap(p.x, p.z)
+		local dot = make("Frame", {
+			Size = UDim2.new(0, 4, 0, 4),
+			Position = UDim2.new(u, -2, v, -2),
+			BackgroundColor3 = Color3.fromRGB(90, 100, 120),
+			BorderSizePixel = 0,
+		}, minimapInner)
+		corner(2, dot)
+		outlineDots[#outlineDots + 1] = dot
+	end
+end
+
+local function clearMinimap()
+	for _, d in ipairs(outlineDots) do
+		d:Destroy()
+	end
+	table.clear(outlineDots)
+	for _, d in pairs(carDots) do
+		d:Destroy()
+	end
+	table.clear(carDots)
+	mapBounds = nil
+end
+
+local function updateMinimapCars(racers: { any })
+	-- 사라진 차량 점 정리
+	local present: { [number]: boolean } = {}
+	for _, r in ipairs(racers) do
+		present[r.userId] = true
+		local dot = carDots[r.userId]
+		if not dot then
+			local isMe = r.userId == player.UserId
+			dot = make("Frame", {
+				Size = UDim2.new(0, isMe and 12 or 9, 0, isMe and 12 or 9),
+				BackgroundColor3 = isMe and Color3.fromRGB(90, 230, 120) or Color3.fromRGB(235, 90, 90),
+				BorderSizePixel = 0,
+				ZIndex = isMe and 5 or 4,
+			}, minimapInner)
+			corner(6, dot)
+			if isMe then
+				make("UIStroke", { Color = Color3.fromRGB(255, 255, 255), Thickness = 1.5 }, dot)
+			end
+			carDots[r.userId] = dot
+		end
+		local u, v = worldToMap(r.x, r.z)
+		local sz = dot.Size.X.Offset
+		dot.Position = UDim2.new(u, -sz / 2, v, -sz / 2)
+	end
+	for userId, dot in pairs(carDots) do
+		if not present[userId] then
+			dot:Destroy()
+			carDots[userId] = nil
+		end
+	end
+end
+
+-- =====================================================================
+-- 실시간 순위 HUD
+-- =====================================================================
+local rankHud = make("Frame", {
+	Size = UDim2.new(0, 240, 0, 220),
+	Position = UDim2.new(1, -256, 0, 200),
+	BackgroundColor3 = Color3.fromRGB(15, 18, 26),
+	BackgroundTransparency = 0.25,
+	Visible = false,
+}, gui)
+corner(10, rankHud)
+local lapLabel = make("TextLabel", {
+	Size = UDim2.new(1, 0, 0, 34),
+	BackgroundColor3 = Color3.fromRGB(40, 110, 200),
+	Text = "LAP 1/2",
+	TextColor3 = Color3.fromRGB(255, 255, 255),
+	Font = Enum.Font.GothamBold,
+	TextScaled = true,
+}, rankHud)
+corner(10, lapLabel)
+local rankList = make("Frame", {
+	Size = UDim2.new(1, -12, 1, -42),
+	Position = UDim2.new(0, 6, 0, 38),
+	BackgroundTransparency = 1,
+}, rankHud)
+make("UIListLayout", { Padding = UDim.new(0, 3), SortOrder = Enum.SortOrder.LayoutOrder }, rankList)
+
+local function updateRankHud(racers: { any }, totalLaps: number)
+	for _, c in ipairs(rankList:GetChildren()) do
+		if c:IsA("TextLabel") then
+			c:Destroy()
+		end
+	end
+	for i, r in ipairs(racers) do
+		local isMe = r.userId == player.UserId
+		if isMe then
+			lapLabel.Text = r.finished and "🏁 완주!" or ("LAP %d/%d"):format(r.lap, totalLaps)
+		end
+		make("TextLabel", {
+			Size = UDim2.new(1, 0, 0, 24),
+			BackgroundColor3 = isMe and Color3.fromRGB(50, 110, 70) or Color3.fromRGB(34, 38, 50),
+			BackgroundTransparency = 0.1,
+			Text = ("%d. %s"):format(i, string.sub(r.name, 1, 14)),
+			TextColor3 = Color3.fromRGB(240, 245, 255),
+			Font = isMe and Enum.Font.GothamBold or Enum.Font.Gotham,
+			TextScaled = true,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			LayoutOrder = i,
+		}, rankList)
+	end
+end
+
+-- =====================================================================
+-- 부스트 / 감속 표시
+-- =====================================================================
+local statusIndicator = make("TextLabel", {
+	Size = UDim2.new(0, 260, 0, 50),
+	Position = UDim2.new(0.5, -130, 1, -90),
+	BackgroundTransparency = 1,
+	Text = "",
+	TextColor3 = Color3.fromRGB(255, 255, 255),
+	TextStrokeTransparency = 0.2,
+	Font = Enum.Font.GothamBlack,
+	TextScaled = true,
+	Visible = false,
+}, gui)
+
+-- 로컬 차량의 부스트/감속 어트리뷰트를 폴링해 표시
+RunService.RenderStepped:Connect(function()
+	local character = player.Character
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	local seat = humanoid and humanoid.SeatPart
+	if not seat or not seat:IsA("VehicleSeat") then
+		statusIndicator.Visible = false
+		return
+	end
+	local now = workspace:GetServerTimeNow()
+	local boostEnd = seat:GetAttribute("BoostEndTime") :: number?
+	local slowEnd = seat:GetAttribute("SlowEndTime") :: number?
+	if boostEnd and now < boostEnd then
+		statusIndicator.Visible = true
+		statusIndicator.Text = "🚀 부스트!"
+		statusIndicator.TextColor3 = Color3.fromRGB(90, 230, 255)
+	elseif slowEnd and now < slowEnd then
+		statusIndicator.Visible = true
+		statusIndicator.Text = "🛢️ 미끄러짐!"
+		statusIndicator.TextColor3 = Color3.fromRGB(255, 180, 60)
+	else
+		statusIndicator.Visible = false
+	end
+end)
+
+-- =====================================================================
+-- 리더보드 패널
+-- =====================================================================
+local leaderboardBtn = actionButton("🏆 순위표", Color3.fromRGB(200, 160, 60), 144)
+
+local lbFrame = make("Frame", {
+	Size = UDim2.new(0, 460, 0, 440),
+	Position = UDim2.new(0.5, -230, 0.5, -220),
+	BackgroundColor3 = Color3.fromRGB(22, 25, 34),
+	Visible = false,
+}, gui)
+corner(14, lbFrame)
+make("TextLabel", {
+	Size = UDim2.new(1, 0, 0, 50),
+	BackgroundTransparency = 1,
+	Text = "🏆 글로벌 최고 기록",
+	TextColor3 = Color3.fromRGB(245, 220, 90),
+	Font = Enum.Font.GothamBold,
+	TextScaled = true,
+}, lbFrame)
+local lbClose = make("TextButton", {
+	Size = UDim2.new(0, 40, 0, 40),
+	Position = UDim2.new(1, -48, 0, 8),
+	BackgroundColor3 = Color3.fromRGB(200, 70, 70),
+	Text = "✕",
+	TextColor3 = Color3.fromRGB(255, 255, 255),
+	Font = Enum.Font.GothamBold,
+	TextScaled = true,
+}, lbFrame)
+corner(8, lbClose)
+local lbPersonal = make("TextLabel", {
+	Size = UDim2.new(1, -24, 0, 34),
+	Position = UDim2.new(0, 12, 0, 54),
+	BackgroundColor3 = Color3.fromRGB(40, 70, 50),
+	Text = "내 최고 기록: 없음",
+	TextColor3 = Color3.fromRGB(230, 245, 235),
+	Font = Enum.Font.GothamMedium,
+	TextScaled = true,
+}, lbFrame)
+corner(8, lbPersonal)
+local lbList = make("ScrollingFrame", {
+	Size = UDim2.new(1, -24, 1, -100),
+	Position = UDim2.new(0, 12, 0, 94),
+	BackgroundTransparency = 1,
+	CanvasSize = UDim2.new(0, 0, 0, 0),
+	AutomaticCanvasSize = Enum.AutomaticSize.Y,
+	ScrollBarThickness = 5,
+}, lbFrame)
+make("UIListLayout", { Padding = UDim.new(0, 5), SortOrder = Enum.SortOrder.LayoutOrder }, lbList)
+
+local function renderLeaderboard(top: { any }, personalBest: number)
+	lbPersonal.Text = personalBest > 0 and ("내 최고 기록: %.2f초"):format(personalBest) or "내 최고 기록: 없음"
+	for _, c in ipairs(lbList:GetChildren()) do
+		if c:IsA("TextLabel") then
+			c:Destroy()
+		end
+	end
+	if #top == 0 then
+		make("TextLabel", {
+			Size = UDim2.new(1, 0, 0, 40),
+			BackgroundTransparency = 1,
+			Text = "아직 기록이 없습니다.",
+			TextColor3 = Color3.fromRGB(200, 205, 215),
+			Font = Enum.Font.Gotham,
+			TextScaled = true,
+		}, lbList)
+		return
+	end
+	for _, e in ipairs(top) do
+		local medal = e.rank == 1 and "🥇" or (e.rank == 2 and "🥈" or (e.rank == 3 and "🥉" or (tostring(e.rank) .. ".")))
+		make("TextLabel", {
+			Size = UDim2.new(1, 0, 0, 38),
+			BackgroundColor3 = e.rank <= 3 and Color3.fromRGB(50, 46, 30) or Color3.fromRGB(34, 38, 50),
+			Text = ("%s  %s   %.2f초"):format(medal, string.sub(e.name, 1, 14), e.time),
+			TextColor3 = e.rank <= 3 and Color3.fromRGB(245, 220, 90) or Color3.fromRGB(225, 230, 240),
+			Font = Enum.Font.GothamMedium,
+			TextScaled = true,
+			LayoutOrder = e.rank,
+		}, lbList)
+	end
+end
+
+local cachedLeaderboard: { any } = {}
+local function openLeaderboard()
+	lbFrame.Visible = true
+	-- 최신 데이터 요청
+	task.spawn(function()
+		local ok, result = pcall(function()
+			return Remotes.Function("GetLeaderboard"):InvokeServer()
+		end)
+		if ok and result then
+			cachedLeaderboard = result.top or {}
+			renderLeaderboard(result.top or {}, result.personalBest or 0)
+		else
+			renderLeaderboard(cachedLeaderboard, data and data.stats and data.stats.bestTime or 0)
+		end
+	end)
+end
+
+leaderboardBtn.Activated:Connect(function()
+	if lbFrame.Visible then
+		lbFrame.Visible = false
+	else
+		openLeaderboard()
+	end
+end)
+lbClose.Activated:Connect(function()
+	lbFrame.Visible = false
+end)
+
+-- =====================================================================
 -- 버튼/이벤트 연결
 -- =====================================================================
 garageBtn.Activated:Connect(function()
@@ -723,10 +1025,33 @@ Remotes.Event("RaceStateChanged").OnClientEvent:Connect(function(info)
 		garageFrame.Visible = false
 		customFrame.Visible = false
 		customizeOpenBtn.Visible = false
+		lbFrame.Visible = false
 	else
 		queueBtn.AutoButtonColor = true
 		setQueueButton(false)
 		queueStatus.Visible = false
+		-- 경주 종료: 미니맵/순위 HUD 숨김 및 정리
+		minimap.Visible = false
+		rankHud.Visible = false
+		statusIndicator.Visible = false
+		clearMinimap()
+	end
+end)
+
+-- 경주 시작 시 미니맵 외곽선 구성
+Remotes.Event("RaceSetup").OnClientEvent:Connect(function(info)
+	if info.path and info.bounds then
+		buildMinimapOutline(info.path, info.bounds)
+		minimap.Visible = true
+		rankHud.Visible = true
+	end
+end)
+
+-- 실시간 순위/미니맵 갱신
+Remotes.Event("RaceProgress").OnClientEvent:Connect(function(info)
+	if info.racers then
+		updateMinimapCars(info.racers)
+		updateRankHud(info.racers, info.laps or 2)
 	end
 end)
 
@@ -741,6 +1066,14 @@ end)
 Remotes.Event("RaceFinished").OnClientEvent:Connect(function(info)
 	if info.results then
 		showResults(info.results)
+	end
+end)
+
+-- 글로벌 순위 갱신 수신 (패널이 열려있으면 반영)
+Remotes.Event("LeaderboardUpdated").OnClientEvent:Connect(function(top)
+	cachedLeaderboard = top or {}
+	if lbFrame.Visible then
+		renderLeaderboard(top or {}, data and data.stats and data.stats.bestTime or 0)
 	end
 end)
 

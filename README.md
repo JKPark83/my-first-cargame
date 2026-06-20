@@ -14,12 +14,16 @@
 | 🏁 멀티플레이 경주 | 대기열 → 카운트다운 → 랜덤 트랙 → 최대 8명 경주 |
 | 🛣️ 절차적 트랙 | 코드로 생성되는 10종 루프 트랙 (시드 기반 재현) |
 | 💰 보상 경제 | 1등 100 / 2등 60 / 3등 40 / 완주 20 게임머니 |
-| 💾 영구 저장 | DataStore로 머니 · 보유차 · 커스텀 영구 저장 |
+| 💾 영구 저장 | DataStore로 머니 · 보유차 · 커스텀 · 최고기록 영구 저장 |
+| 🗺️ 미니맵 + 실시간 순위 | 경주 중 트랙 미니맵·차량 위치·실시간 등수·랩 표시 |
+| 🚀 부스트 / 장애물 | 부스트 패드(가속) · 오일 슬릭(감속) · 라바콘 |
+| 🏆 글로벌 리더보드 | 최고 완주 기록 순위 (라운지 전광판 + UI 패널) |
 
 ## 🎮 조작
 
 - **W / S** : 가속 / 후진
 - **A / D** : 좌 / 우 조향
+- 🚀 **부스트 패드**(파란 발판)를 밟으면 일시 가속, 🛢️ **오일 슬릭**(검은 웅덩이)을 밟으면 감속
 - (VehicleSeat 기본 입력을 아케이드 물리로 변환)
 
 ## 🗂️ 프로젝트 구조
@@ -37,7 +41,8 @@ src/
 │  ├─ TrackGenerator.luau     # 절차적 트랙 생성
 │  ├─ CarSpawner.luau         # 차량 조립·성능·커스텀 적용
 │  ├─ ShopService.luau        # 구매·선택·커스터마이징 검증
-│  └─ RaceManager.luau        # 대기열·경주·순위·보상 (핵심 루프)
+│  ├─ LeaderboardService.luau # 글로벌 최고기록 (OrderedDataStore)
+│  └─ RaceManager.luau        # 대기열·경주·순위·보상·미니맵·부스트 (핵심 루프)
 └─ StarterPlayer/StarterPlayerScripts/
    ├─ CarController.client.luau  # 아케이드 주행 물리
    └─ UIController.client.luau   # 차고·커스텀·HUD·결과 UI
@@ -76,6 +81,9 @@ src/
 - 보상 금액 → `GameConfig.Economy.rewardsByPlace`, `finishReward`
 - 트랙 수 / 인원 / 랩 / 카운트다운 → `GameConfig.Race`
 - 커스터마이징 색상/스티커/제한시간 → `GameConfig.Customization`
+- 부스트 세기/지속시간/개수 → `GameConfig.Boost`
+- 오일 슬릭 감속/개수, 콘 개수 → `GameConfig.Obstacles`
+- 리더보드 표시 인원/캐시 주기 → `GameConfig.Leaderboard`
 
 ## 💎 로벅스(수익화) 연결 — 출시 전 TODO
 

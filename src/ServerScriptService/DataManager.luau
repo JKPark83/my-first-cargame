@@ -53,6 +53,7 @@ export type PlayerData = {
 	stats: {
 		races: number,
 		wins: number,
+		bestTime: number, -- 개인 최고 완주 기록(초). 0 = 기록 없음
 	},
 }
 
@@ -77,7 +78,7 @@ local function defaultData(): PlayerData
 		ownedCars = owned,
 		selectedCar = GameConfig.Economy.defaultCarId,
 		customizations = {},
-		stats = { races = 0, wins = 0 },
+		stats = { races = 0, wins = 0, bestTime = 0 },
 	}
 end
 
@@ -110,6 +111,7 @@ local function reconcile(raw: any): PlayerData
 	if type(raw.stats) == "table" then
 		data.stats.races = tonumber(raw.stats.races) or 0
 		data.stats.wins = tonumber(raw.stats.wins) or 0
+		data.stats.bestTime = tonumber(raw.stats.bestTime) or 0
 	end
 	return data
 end
@@ -252,6 +254,20 @@ function DataManager.recordRace(player: Player, won: boolean)
 	if won then
 		data.stats.wins += 1
 	end
+end
+
+-- 개인 최고 기록 갱신. 신기록이면 true 반환.
+function DataManager.updateBestTime(player: Player, time: number): boolean
+	local data = cache[player.UserId]
+	if not data or time <= 0 then
+		return false
+	end
+	if data.stats.bestTime == 0 or time < data.stats.bestTime then
+		data.stats.bestTime = time
+		DataManager.pushToClient(player)
+		return true
+	end
+	return false
 end
 
 -- =====================================================================

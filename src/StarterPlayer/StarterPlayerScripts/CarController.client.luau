@@ -12,6 +12,9 @@
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local GameConfig = require(ReplicatedStorage.GameConfig)
 
 local player = Players.LocalPlayer
 
@@ -58,6 +61,20 @@ RunService.Heartbeat:Connect(function(dt: number)
 	local topSpeed = (seat:GetAttribute("TopSpeed") :: number) or 120
 	local accel = (seat:GetAttribute("Accel") :: number) or 30
 	local handling = (seat:GetAttribute("Handling") :: number) or 0.65
+
+	-- 부스트 / 감속(오일) 효과 적용 (서버 시각 기준 어트리뷰트)
+	local now = workspace:GetServerTimeNow()
+	local boostEnd = seat:GetAttribute("BoostEndTime") :: number?
+	local slowEnd = seat:GetAttribute("SlowEndTime") :: number?
+	local boosting = boostEnd ~= nil and now < boostEnd
+	local slowed = slowEnd ~= nil and now < slowEnd
+	if boosting then
+		topSpeed *= GameConfig.Boost.speedMultiplier
+		accel *= GameConfig.Boost.accelMultiplier
+	end
+	if slowed then
+		topSpeed *= GameConfig.Obstacles.slowFactor
+	end
 
 	-- 입력 (VehicleSeat가 WASD를 자동으로 -1~1 범위로 제공)
 	local throttle = seat.ThrottleFloat -- 전/후진

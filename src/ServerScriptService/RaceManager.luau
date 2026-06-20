@@ -21,6 +21,7 @@ local DataManager = require(script.Parent.DataManager)
 local CarSpawner = require(script.Parent.CarSpawner)
 local TrackGenerator = require(script.Parent.TrackGenerator)
 local LoungeBuilder = require(script.Parent.LoungeBuilder)
+local LeaderboardService = require(script.Parent.LeaderboardService)
 
 local RaceManager = {}
 
@@ -31,6 +32,7 @@ type RacerState = {
 	car: Model?,
 	nextCp: number, -- 다음으로 통과해야 할 체크포인트(1~N)
 	lap: number,
+	progress: number, -- 통과한 체크포인트 누적 수 (실시간 순위용)
 	finished: boolean,
 	finishTime: number?,
 	place: number?,
@@ -196,9 +198,25 @@ function RaceManager.startRace()
 			car = car,
 			nextCp = 2, -- 출발선(cp1) 뒤에서 시작 → 다음은 2번
 			lap = 0,
+			progress = 0,
 			finished = false,
 		}
 	end
+
+	-- 부스트 패드 / 오일 슬릭 상호작용 연결
+	RaceManager.setupTrackItems(track)
+
+	-- 미니맵용 트랙 외곽선/바운드 전달
+	local pathData = {}
+	for i, p in ipairs(track.minimapPath) do
+		pathData[i] = { x = p.X, z = p.Z }
+	end
+	Remotes.Event("RaceSetup"):FireAllClients({
+		track = track.displayName,
+		laps = GameConfig.Race.laps,
+		path = pathData,
+		bounds = track.bounds,
+	})
 
 	-- 경주 시작 카운트다운(3,2,1,GO) 동안 차량 고정
 	RaceManager.freezeCars(true)
@@ -228,6 +246,103 @@ function RaceManager.freezeCars(frozen: boolean)
 	end
 end
 
+-- 닿은 파트로부터 소속 차량 모델을 찾음
+local function findCarModel(hit: BasePart): Model?
+	local node: Instance? = hit
+	while node and node ~= workspace do
+		if node:IsA("Model") and node:GetAttribute("OwnerUserId") then
+			return node
+		end
+		node = node.Parent
+	end
+	return nil
+end
+
+-- 부스트 패드 / 오일 슬릭에 Touched 핸들러 연결
+function RaceManager.setupTrackItems(track: TrackGenerator.TrackInfo)
+	local lastTouch: { [string]: number } = {} -- "itemId:userId" -> 시각 (디바운스)
+
+	local function bind(item: BasePart, kind: string, duration: number, attrName: string)
+		item.Touched:Connect(function(hit)
+			if state ~= "Racing" then
+				return
+			end
+			local car = findCarModel(hit)
+			if not car or not car.PrimaryPart then
+				return
+			end
+			local userId = car:GetAttribute("OwnerUserId")
+			local key = tostring(item:GetDebugId()) .. ":" .. tostring(userId)
+			local now = workspace:GetServerTimeNow()
+			if lastTouch[key] and now - lastTouch[key] < duration + 0.3 then
+				return
+			end
+			lastTouch[key] = now
+			-- 효과 종료 시각을 어트리뷰트로 기록 → 클라 CarController가 읽음
+			car.PrimaryPart:SetAttribute(attrName, now + duration)
+		end)
+	end
+
+	for _, pad in ipairs(track.boostPads) do
+		bind(pad, "boost", GameConfig.Boost.duration, "BoostEndTime")
+	end
+	for _, oil in ipairs(track.oilSlicks) do
+		bind(oil, "oil", GameConfig.Obstacles.slowDuration, "SlowEndTime")
+	end
+end
+
+-- 실시간 순위 계산 (완주자 우선, 그다음 진행도/근접도)
+local function computeRanking(track: TrackGenerator.TrackInfo): { RacerState }
+	local list: { RacerState } = {}
+	for _, racer in pairs(racers) do
+		table.insert(list, racer)
+	end
+	table.sort(list, function(a, b)
+		-- 완주자는 최종 순위(place)로 정렬되어 항상 앞
+		if a.finished ~= b.finished then
+			return a.finished
+		end
+		if a.finished and b.finished then
+			return (a.place or 999) < (b.place or 999)
+		end
+		-- 미완주: 진행도(통과 체크포인트 수) 높은 쪽이 앞
+		if a.progress ~= b.progress then
+			return a.progress > b.progress
+		end
+		-- 동일 진행도: 다음 체크포인트에 더 가까운 쪽이 앞
+		local cpA = track.checkpoints[a.nextCp]
+		local cpB = track.checkpoints[b.nextCp]
+		local da, db = math.huge, math.huge
+		if a.car and a.car.PrimaryPart and cpA then
+			da = (a.car.PrimaryPart.Position - cpA.Position).Magnitude
+		end
+		if b.car and b.car.PrimaryPart and cpB then
+			db = (b.car.PrimaryPart.Position - cpB.Position).Magnitude
+		end
+		return da < db
+	end)
+	return list
+end
+
+-- 실시간 순위/차량 위치를 클라이언트로 브로드캐스트
+function RaceManager.broadcastProgress(track: TrackGenerator.TrackInfo)
+	local ranked = computeRanking(track)
+	local payload = {}
+	for rank, racer in ipairs(ranked) do
+		local pos = racer.car and racer.car.PrimaryPart and racer.car.PrimaryPart.Position or Vector3.zero
+		payload[rank] = {
+			userId = racer.player.UserId,
+			name = racer.player.DisplayName,
+			x = pos.X,
+			z = pos.Z,
+			place = rank,
+			lap = math.min(racer.lap + 1, GameConfig.Race.laps),
+			finished = racer.finished,
+		}
+	end
+	Remotes.Event("RaceProgress"):FireAllClients({ racers = payload, laps = GameConfig.Race.laps })
+end
+
 -- =====================================================================
 -- 진행 추적 (체크포인트/랩)
 -- =====================================================================
@@ -238,12 +353,13 @@ function RaceManager.beginTracking()
 	end
 	local startTime = os.clock()
 	local finishedCount = 0
+	local broadcastAccum = 0
 
 	if raceConnection then
 		raceConnection:Disconnect()
 	end
 
-	raceConnection = RunService.Heartbeat:Connect(function()
+	raceConnection = RunService.Heartbeat:Connect(function(dt: number)
 		if state ~= "Racing" then
 			return
 		end
@@ -263,6 +379,7 @@ function RaceManager.beginTracking()
 				local d = (Vector3.new(carPos.X, 0, carPos.Z) - Vector3.new(cp.Position.X, 0, cp.Position.Z)).Magnitude
 				if d <= CHECKPOINT_RADIUS then
 					-- 체크포인트 통과
+					racer.progress += 1
 					if racer.nextCp == 1 then
 						racer.lap += 1
 						if racer.lap >= GameConfig.Race.laps then
@@ -277,6 +394,13 @@ function RaceManager.beginTracking()
 					racer.nextCp = (racer.nextCp % n) + 1
 				end
 			end
+		end
+
+		-- 실시간 순위/미니맵 주기적 브로드캐스트
+		broadcastAccum += dt
+		if broadcastAccum >= GameConfig.Race.progressBroadcastInterval then
+			broadcastAccum = 0
+			RaceManager.broadcastProgress(track)
 		end
 
 		-- 남은 레이서가 모두 완주했거나 제한 시간 초과 시 종료
@@ -302,6 +426,16 @@ function RaceManager.onRacerFinished(racer: RacerState)
 	DataManager.addMoney(racer.player, reward)
 	DataManager.recordRace(racer.player, place == 1)
 	notify(racer.player, ("%d등! +%d 머니"):format(place, reward))
+
+	-- 최고 기록 갱신 + 글로벌 순위표 제출
+	local time = racer.finishTime
+	if time and time > 0 then
+		local improved = DataManager.updateBestTime(racer.player, time)
+		if improved then
+			notify(racer.player, ("🏆 개인 신기록! %.2f초"):format(time))
+		end
+		LeaderboardService.submit(racer.player.UserId, racer.player.DisplayName, time)
+	end
 end
 
 -- =====================================================================

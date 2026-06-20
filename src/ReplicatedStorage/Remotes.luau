@@ -32,13 +32,17 @@ local EVENT_NAMES = {
 	"PlayerDataUpdated", -- 플레이어 데이터(머니/보유차/커스텀) 갱신
 	"QueueStateChanged", -- 대기열 상태/카운트다운 변경
 	"RaceStateChanged", -- 경주 상태(시작/진행/종료) 변경
+	"RaceSetup", -- 경주 시작 시 트랙 외곽선/바운드(미니맵용) 전달
+	"RaceProgress", -- 실시간 순위/차량 위치(미니맵 HUD)
 	"RaceCountdown", -- 경주 시작 카운트다운
 	"RaceFinished", -- 경주 결과(순위/보상)
+	"LeaderboardUpdated", -- 글로벌 최고기록 순위 갱신
 	"Notify", -- 일반 알림 메시지
 }
 
 local FUNCTION_NAMES = {
 	"GetPlayerData", -- 최초 접속 시 데이터 일괄 요청
+	"GetLeaderboard", -- 글로벌 순위표 + 개인 최고기록 요청
 }
 
 local Remotes = {}

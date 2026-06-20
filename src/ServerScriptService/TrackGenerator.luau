@@ -31,6 +31,10 @@ export type TrackInfo = {
 	spawnCFrames: { CFrame },
 	checkpoints: { BasePart }, -- 순서대로 통과해야 하는 체크포인트
 	checkpointCount: number,
+	minimapPath: { Vector3 }, -- 미니맵 외곽선용 다운샘플 경로
+	bounds: { minX: number, maxX: number, minZ: number, maxZ: number },
+	boostPads: { BasePart }, -- 부스트 패드
+	oilSlicks: { BasePart }, -- 오일 슬릭(감속)
 }
 
 -- 시드 기반 의사난수 생성기 (재현 가능)
@@ -114,6 +118,72 @@ local function makeRoadSegment(a: Vector3, b: Vector3, parent: Instance): ()
 		wall.Transparency = 0.35
 		wall.Parent = parent
 	end
+end
+
+-- 경로 위 한 지점의 진행 방향 CFrame (i번째 점에서 다음 점을 바라봄)
+local function pathCFrameAt(path: { Vector3 }, i: number): CFrame
+	local a = path[i]
+	local b = path[(i % #path) + 1]
+	return CFrame.lookAt(a, b)
+end
+
+-- 부스트 패드 생성
+local function makeBoostPad(cf: CFrame, parent: Instance): BasePart
+	local pad = Instance.new("Part")
+	pad.Name = "BoostPad"
+	pad.Anchored = true
+	pad.CanCollide = false
+	pad.Material = Enum.Material.Neon
+	pad.Color = GameConfig.Boost.padColor
+	pad.Size = Vector3.new(14, 0.4, 10)
+	pad.CFrame = cf * CFrame.new(0, 0.3, 0)
+	pad.Transparency = 0.15
+	pad.Parent = parent
+
+	-- 화살표 표시(SurfaceGui 텍스트)
+	local sg = Instance.new("SurfaceGui")
+	sg.Face = Enum.NormalId.Top
+	sg.Parent = pad
+	local lbl = Instance.new("TextLabel")
+	lbl.Size = UDim2.fromScale(1, 1)
+	lbl.BackgroundTransparency = 1
+	lbl.Text = "▲▲▲"
+	lbl.TextColor3 = Color3.fromRGB(255, 255, 255)
+	lbl.Font = Enum.Font.GothamBold
+	lbl.TextScaled = true
+	lbl.Rotation = 90
+	lbl.Parent = sg
+	return pad
+end
+
+-- 오일 슬릭(감속) 생성
+local function makeOilSlick(cf: CFrame, parent: Instance): BasePart
+	local oil = Instance.new("Part")
+	oil.Name = "OilSlick"
+	oil.Shape = Enum.PartType.Cylinder
+	oil.Anchored = true
+	oil.CanCollide = false
+	oil.Material = Enum.Material.Glass
+	oil.Color = GameConfig.Obstacles.oilColor
+	oil.Size = Vector3.new(0.3, 11, 11)
+	oil.CFrame = cf * CFrame.new(0, 0.2, 0) * CFrame.Angles(0, 0, math.rad(90))
+	oil.Transparency = 0.25
+	oil.Reflectance = 0.4
+	oil.Parent = parent
+	return oil
+end
+
+-- 장식용 라바콘 생성 (시각적 장애물)
+local function makeCone(cf: CFrame, parent: Instance)
+	local cone = Instance.new("Part")
+	cone.Name = "Cone"
+	cone.Anchored = true
+	cone.CanCollide = false
+	cone.Material = Enum.Material.SmoothPlastic
+	cone.Color = Color3.fromRGB(245, 140, 30)
+	cone.Size = Vector3.new(2, 4, 2)
+	cone.CFrame = cf * CFrame.new(0, 2, 0)
+	cone.Parent = parent
 end
 
 -- =====================================================================
@@ -200,6 +270,57 @@ function TrackGenerator.build(index: number, parent: Instance?): TrackInfo
 		end
 	end
 
+	-- ───────── 부스트 패드 / 오일 슬릭 / 콘 배치 ─────────
+	local boostPads: { BasePart } = {}
+	local oilSlicks: { BasePart } = {}
+	local itemFolder = Instance.new("Folder")
+	itemFolder.Name = "TrackItems"
+	itemFolder.Parent = model
+
+	-- 출발선 주변(앞부분)은 비워두기 위해 일부 구간 제외
+	local startGap = math.floor(#path * 0.06)
+	local usable = #path - startGap * 2
+
+	-- 부스트 패드: 도로 중앙에 균등 배치
+	for i = 1, GameConfig.Boost.padsPerTrack do
+		local idx = startGap + math.floor(usable * (i - 0.5) / GameConfig.Boost.padsPerTrack) + 1
+		idx = ((idx - 1) % #path) + 1
+		local cf = pathCFrameAt(path, idx)
+		boostPads[i] = makeBoostPad(cf, itemFolder)
+	end
+
+	-- 오일 슬릭: 좌우로 살짝 비껴 배치(피할 수 있게)
+	for i = 1, GameConfig.Obstacles.oilPerTrack do
+		local idx = startGap + math.floor(usable * (i - 0.5) / GameConfig.Obstacles.oilPerTrack) + 1
+		idx = ((idx + 4 - 1) % #path) + 1 -- 부스트와 겹치지 않게 오프셋
+		local side = (i % 2 == 0) and 1 or -1
+		local cf = pathCFrameAt(path, idx) * CFrame.new(side * (ROAD_WIDTH / 4), 0, 0)
+		oilSlicks[i] = makeOilSlick(cf, itemFolder)
+	end
+
+	-- 장식용 콘: 도로 가장자리에 배치
+	for i = 1, GameConfig.Obstacles.conesPerTrack do
+		local idx = math.floor(#path * (i - 0.5) / GameConfig.Obstacles.conesPerTrack) + 1
+		idx = ((idx - 1) % #path) + 1
+		local side = (i % 2 == 0) and 1 or -1
+		local cf = pathCFrameAt(path, idx) * CFrame.new(side * (ROAD_WIDTH / 2 - 2), 0, 0)
+		makeCone(cf, itemFolder)
+	end
+
+	-- ───────── 미니맵용 외곽선 & 바운드 ─────────
+	local minimapPath: { Vector3 } = {}
+	for i = 1, #path, 2 do -- 다운샘플
+		minimapPath[#minimapPath + 1] = path[i]
+	end
+	local minX, maxX = math.huge, -math.huge
+	local minZ, maxZ = math.huge, -math.huge
+	for _, p in ipairs(path) do
+		minX = math.min(minX, p.X)
+		maxX = math.max(maxX, p.X)
+		minZ = math.min(minZ, p.Z)
+		maxZ = math.max(maxZ, p.Z)
+	end
+
 	model.Parent = parent or workspace
 
 	return {
@@ -210,6 +331,10 @@ function TrackGenerator.build(index: number, parent: Instance?): TrackInfo
 		spawnCFrames = spawnCFrames,
 		checkpoints = checkpoints,
 		checkpointCount = #checkpoints,
+		minimapPath = minimapPath,
+		bounds = { minX = minX, maxX = maxX, minZ = minZ, maxZ = maxZ },
+		boostPads = boostPads,
+		oilSlicks = oilSlicks,
 	}
 end
 

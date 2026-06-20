@@ -19,6 +19,7 @@ local LoungeBuilder = require(script.Parent.LoungeBuilder)
 local DataManager = require(script.Parent.DataManager)
 local ShopService = require(script.Parent.ShopService)
 local RaceManager = require(script.Parent.RaceManager)
+local LeaderboardService = require(script.Parent.LeaderboardService)
 
 -- 1) 라운지 생성
 LoungeBuilder.build()
@@ -29,6 +30,7 @@ DataManager.init()
 -- 3) 서비스 초기화
 ShopService.init()
 RaceManager.init()
+LeaderboardService.init()
 
 -- 4) 경주 관련 원격 요청 연결
 Remotes.Event("RequestJoinQueue").OnServerEvent:Connect(function(player)
@@ -48,6 +50,15 @@ Remotes.Function("GetPlayerData").OnServerInvoke = function(player)
 		waited += 0.2
 	end
 	return DataManager.get(player)
+end
+
+-- 글로벌 순위표 + 개인 최고기록 요청
+Remotes.Function("GetLeaderboard").OnServerInvoke = function(player)
+	local data = DataManager.get(player)
+	return {
+		top = LeaderboardService.getTop(),
+		personalBest = data and data.stats.bestTime or 0,
+	}
 end
 
 -- 캐릭터 스폰 시 라운지 위치로 이동
@@ -89,5 +100,15 @@ if queuePad then
 		RaceManager.joinQueue(player)
 	end)
 end
+
+-- 라운지 전광판 주기 갱신 + 전체 클라이언트 순위 브로드캐스트
+task.spawn(function()
+	while true do
+		local top = LeaderboardService.getTop()
+		LoungeBuilder.updateLeaderboard(top)
+		Remotes.Event("LeaderboardUpdated"):FireAllClients(top)
+		task.wait(30)
+	end
+end)
 
 print("[Server] 자동차 경주 게임 서버 초기화 완료 🏁")
