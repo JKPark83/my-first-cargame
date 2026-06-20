@@ -59,33 +59,82 @@ local function decor(model: Model, seat: BasePart, offset: CFrame, props: { [str
 	return p
 end
 
--- 바퀴 4개 생성 (타이어 + 휠 캡)
--- 실린더는 로컬 X축으로 뻗으므로, 회전 없이 두면 원형 면이 좌/우(±X)를 향한다 → 올바른 바퀴 방향
+-- 타이어 반경(3.3/2). 클라이언트 CarController가 굴림 회전량 계산에 사용 (시트 어트리뷰트로 전달)
+local WHEEL_RADIUS = 1.65
+
+-- 바퀴 4개 생성 (타이어 + 휠 캡 + 브레이크 디스크)
+-- 실린더는 로컬 X축으로 뻗으므로, 회전 없이 두면 원형 면이 좌/우(±X)를 향한다 → 올바른 바퀴 방향.
+-- 핵심: 타이어를 WeldConstraint가 아니라 Motor6D로 시트에 연결한다. 클라이언트가 매 프레임
+--       Motor6D.C0를 회전시켜 앞바퀴 조향(Y축 yaw) + 전체 바퀴 굴림(X축 spin)을 시각화한다.
+--       림/디스크는 타이어에 강체 용접되어 타이어와 함께 돈다.
 local function buildWheels(model: Model, seat: BasePart, wheelColor: Color3)
 	local halfW = BODY_W / 2
 	local halfL = BODY_L / 2
 	local wheelX = halfW + 0.05 -- 살짝 바깥으로
 	local axleZ = halfL - 2.6 -- 앞/뒤 차축 위치
-	local wheelY = 0.9 -- 시트 중심 기준 (반경 1.6 → 바닥 ≈ 지면)
+	local wheelY = 0.9 -- 시트 중심 기준 (반경 1.65 → 바닥 ≈ 지면)
 
 	local rimColor = wheelColor:Lerp(Color3.fromRGB(225, 225, 230), 0.55)
 
+	local function spinPart(props: { [string]: any }, attachTo: BasePart, cf: CFrame): Part
+		local p = Instance.new("Part")
+		p.Anchored = false
+		p.CanCollide = false
+		p.Massless = true
+		p.TopSurface = Enum.SurfaceType.Smooth
+		p.BottomSurface = Enum.SurfaceType.Smooth
+		for k, v in pairs(props) do
+			(p :: any)[k] = v
+		end
+		p.CFrame = cf
+		p.Parent = model
+		weld(attachTo, p)
+		return p
+	end
+
 	for _, sx in ipairs({ 1, -1 }) do
 		for _, sz in ipairs({ 1, -1 }) do
-			-- 타이어
-			decor(model, seat, CFrame.new(sx * wheelX, wheelY, sz * axleZ), {
+			-- 전진 = -Z 이므로 -Z축(sz<0) 바퀴가 앞바퀴 → 조향 대상
+			local isFront = sz < 0
+			local center = CFrame.new(sx * wheelX, wheelY, sz * axleZ)
+
+			-- 타이어(메인): Motor6D로 시트에 연결
+			local tire = Instance.new("Part")
+			tire.Name = isFront and "WheelFront" or "WheelRear"
+			tire.Shape = Enum.PartType.Cylinder
+			tire.Size = Vector3.new(1.6, 3.3, 3.3)
+			tire.Color = wheelColor
+			tire.Material = Enum.Material.SmoothPlastic
+			tire.Anchored = false
+			tire.CanCollide = false
+			tire.Massless = true
+			tire.TopSurface = Enum.SurfaceType.Smooth
+			tire.BottomSurface = Enum.SurfaceType.Smooth
+			tire.CFrame = seat.CFrame * center
+			tire.Parent = model
+
+			local motor = Instance.new("Motor6D")
+			motor.Name = "WheelMotor"
+			motor.Part0 = seat
+			motor.Part1 = tire
+			motor.C0 = center -- 회전=단위 → 실린더 축 = 시트 X = 좌우 (올바른 바퀴 방향)
+			motor.C1 = CFrame.new()
+			motor:SetAttribute("FrontWheel", isFront)
+			motor.Parent = seat
+
+			-- 림 + 브레이크 디스크: 타이어에 강체 용접 (타이어와 함께 회전)
+			spinPart({
 				Shape = Enum.PartType.Cylinder,
-				Size = Vector3.new(1.3, 3.2, 3.2),
-				Color = wheelColor,
-				Material = Enum.Material.SmoothPlastic,
-			})
-			-- 휠 캡(림) — 타이어보다 살짝 바깥으로 튀어나오게
-			decor(model, seat, CFrame.new(sx * (wheelX + 0.18), wheelY, sz * axleZ), {
-				Shape = Enum.PartType.Cylinder,
-				Size = Vector3.new(1.3, 1.7, 1.7),
+				Size = Vector3.new(1.5, 2.0, 2.0),
 				Color = rimColor,
 				Material = Enum.Material.Metal,
-			})
+			}, tire, tire.CFrame * CFrame.new(sx * 0.22, 0, 0))
+			spinPart({
+				Shape = Enum.PartType.Cylinder,
+				Size = Vector3.new(0.2, 0.9, 0.9),
+				Color = Color3.fromRGB(60, 63, 72),
+				Material = Enum.Material.Metal,
+			}, tire, tire.CFrame * CFrame.new(sx * 0.34, 0, 0))
 		end
 	end
 end
@@ -117,81 +166,183 @@ function CarSpawner.build(carDef: any, custom: any?): Model
 	seat.Parent = model
 	model.PrimaryPart = seat
 
-	-- 앞 후드 (운전자 앞쪽으로 솟은 보닛)
-	decor(model, seat, CFrame.new(0, 1.15, -4.4), {
-		Size = Vector3.new(BODY_W - 0.4, 1.0, 5.2),
+	-- ── 전면부 ──────────────────────────────────────────────
+	-- 낮고 길게 깔린 후드(보닛): 앞으로 살짝 내려가는 웨지 실루엣
+	decor(model, seat, CFrame.new(0, 1.0, -4.3) * CFrame.Angles(math.rad(-3), 0, 0), {
+		Size = Vector3.new(BODY_W - 0.5, 0.85, 5.6),
 		Color = bodyColor,
 		Material = Enum.Material.SmoothPlastic,
 	})
-	-- 앞 노즈/범퍼
-	decor(model, seat, CFrame.new(0, 0.25, -6.9), {
-		Size = Vector3.new(BODY_W + 0.1, 1.1, 1.4),
+	-- 후드 에어 스쿱(통풍구)
+	decor(model, seat, CFrame.new(0, 1.5, -3.7), {
+		Size = Vector3.new(1.7, 0.5, 2.2),
+		Color = trim,
+		Material = Enum.Material.SmoothPlastic,
+	})
+	-- 프런트 노즈/범퍼
+	decor(model, seat, CFrame.new(0, 0.35, -6.7), {
+		Size = Vector3.new(BODY_W + 0.2, 1.2, 1.5),
 		Color = darkBody,
 		Material = Enum.Material.SmoothPlastic,
 	})
-	-- 뒤 트렁크 데크
-	decor(model, seat, CFrame.new(0, 1.1, 4.6), {
-		Size = Vector3.new(BODY_W - 0.4, 0.9, 4.8),
-		Color = bodyColor,
+	-- 프런트 그릴(흡기구, 무광 블랙)
+	decor(model, seat, CFrame.new(0, 0.15, -7.35), {
+		Size = Vector3.new(BODY_W - 1.8, 0.7, 0.4),
+		Color = Color3.fromRGB(18, 19, 24),
 		Material = Enum.Material.SmoothPlastic,
 	})
-	-- 뒤 범퍼
-	decor(model, seat, CFrame.new(0, 0.25, 6.9), {
-		Size = Vector3.new(BODY_W + 0.1, 1.1, 1.4),
-		Color = darkBody,
+	-- 프런트 스플리터(립) — 바닥에 낮게 깔림
+	decor(model, seat, CFrame.new(0, -0.4, -6.95), {
+		Size = Vector3.new(BODY_W + 1.0, 0.25, 1.6),
+		Color = trim,
 		Material = Enum.Material.SmoothPlastic,
 	})
+	-- 카나드(앞 코너 핀) 좌우
+	for _, sx in ipairs({ 1, -1 }) do
+		decor(model, seat, CFrame.new(sx * (BODY_W / 2 + 0.15), 0.05, -6.5), {
+			Size = Vector3.new(0.9, 0.12, 1.3),
+			Color = trim,
+			Material = Enum.Material.Metal,
+		})
+	end
+	-- 헤드라이트(앞, 얇은 LED 바 — 따뜻한 흰색 네온)
+	for _, sx in ipairs({ 1, -1 }) do
+		decor(model, seat, CFrame.new(sx * 2.45, 0.7, -7.0), {
+			Size = Vector3.new(1.5, 0.35, 0.3),
+			Color = Color3.fromRGB(255, 246, 205),
+			Material = Enum.Material.Neon,
+		})
+	end
 
-	-- 운전석 뒤 캐빈/롤후프 (머리 위는 비워 탑승 클리핑 방지)
-	decor(model, seat, CFrame.new(0, 1.45, 2.4), {
-		Size = Vector3.new(BODY_W - 1.2, 1.9, 2.8),
+	-- ── 캐빈/그린하우스 ────────────────────────────────────
+	-- 앞 유리 (뒤로 기울임)
+	decor(model, seat, CFrame.new(0, 1.55, -1.2) * CFrame.Angles(math.rad(30), 0, 0), {
+		Size = Vector3.new(BODY_W - 1.4, 1.6, 0.22),
+		Color = Color3.fromRGB(155, 210, 235),
+		Material = Enum.Material.Glass,
+		Transparency = 0.4,
+	})
+	-- 운전석 뒤 패스트백 캐빈/롤후프 (머리 위는 비워 클리핑 방지)
+	decor(model, seat, CFrame.new(0, 1.5, 2.5), {
+		Size = Vector3.new(BODY_W - 1.1, 1.8, 3.0),
 		Color = darkBody,
 		Material = Enum.Material.SmoothPlastic,
 	})
-	-- 앞 유리 (운전자 앞쪽, 뒤로 기울임)
-	decor(model, seat, CFrame.new(0, 1.5, -1.3) * CFrame.Angles(math.rad(28), 0, 0), {
-		Size = Vector3.new(BODY_W - 1.3, 1.7, 0.22),
+	-- 리어 윈도(뒤로 누운 글라스)
+	decor(model, seat, CFrame.new(0, 1.5, 1.0) * CFrame.Angles(math.rad(-32), 0, 0), {
+		Size = Vector3.new(BODY_W - 1.6, 1.4, 0.2),
 		Color = Color3.fromRGB(150, 205, 230),
 		Material = Enum.Material.Glass,
 		Transparency = 0.45,
 	})
-	-- 사이드 도어 패널 (벨트라인) — 좌우
+	-- 사이드 윈도(그린하우스) 좌우
 	for _, sx in ipairs({ 1, -1 }) do
-		decor(model, seat, CFrame.new(sx * (BODY_W / 2 - 0.1), 0.95, 0.6), {
-			Size = Vector3.new(0.3, 0.9, 7.5),
+		decor(model, seat, CFrame.new(sx * (BODY_W / 2 - 0.55), 1.5, 1.9), {
+			Size = Vector3.new(0.18, 1.0, 2.6),
+			Color = Color3.fromRGB(40, 44, 52),
+			Material = Enum.Material.Glass,
+			Transparency = 0.35,
+		})
+	end
+	-- 사이드 미러 좌우
+	for _, sx in ipairs({ 1, -1 }) do
+		decor(model, seat, CFrame.new(sx * (BODY_W / 2 + 0.35), 1.45, -0.7), {
+			Size = Vector3.new(0.7, 0.32, 0.5),
 			Color = darkBody,
 			Material = Enum.Material.SmoothPlastic,
 		})
 	end
 
-	-- 스포일러(윙) + 지지대
+	-- ── 측면 ───────────────────────────────────────────────
+	-- 사이드 도어 패널(벨트라인)
 	for _, sx in ipairs({ 1, -1 }) do
-		decor(model, seat, CFrame.new(sx * 2.2, 1.9, 6.6), {
-			Size = Vector3.new(0.35, 1.1, 0.5),
+		decor(model, seat, CFrame.new(sx * (BODY_W / 2 - 0.1), 0.95, 0.6), {
+			Size = Vector3.new(0.3, 0.9, 7.6),
+			Color = darkBody,
+			Material = Enum.Material.SmoothPlastic,
+		})
+	end
+	-- 사이드 스커트(낮게 깔린 느낌)
+	for _, sx in ipairs({ 1, -1 }) do
+		decor(model, seat, CFrame.new(sx * (BODY_W / 2 - 0.02), -0.35, 0.4), {
+			Size = Vector3.new(0.35, 0.7, 9.4),
+			Color = trim,
+			Material = Enum.Material.SmoothPlastic,
+		})
+	end
+	-- 펜더 플레어 ×4 (바퀴 위 근육질 아치)
+	local flareZ = BODY_L / 2 - 2.6
+	for _, sx in ipairs({ 1, -1 }) do
+		for _, sz in ipairs({ 1, -1 }) do
+			decor(model, seat, CFrame.new(sx * (BODY_W / 2 + 0.05), 0.7, sz * flareZ), {
+				Size = Vector3.new(0.9, 1.3, 4.0),
+				Color = darkBody,
+				Material = Enum.Material.SmoothPlastic,
+			})
+		end
+	end
+
+	-- ── 후면부 ─────────────────────────────────────────────
+	-- 트렁크 데크(패스트백에서 이어지는 낮은 데크)
+	decor(model, seat, CFrame.new(0, 1.1, 4.7), {
+		Size = Vector3.new(BODY_W - 0.5, 0.8, 4.6),
+		Color = bodyColor,
+		Material = Enum.Material.SmoothPlastic,
+	})
+	-- 리어 범퍼
+	decor(model, seat, CFrame.new(0, 0.35, 6.75), {
+		Size = Vector3.new(BODY_W + 0.2, 1.2, 1.4),
+		Color = darkBody,
+		Material = Enum.Material.SmoothPlastic,
+	})
+	-- 리어 디퓨저(무광 블랙, 바닥)
+	decor(model, seat, CFrame.new(0, -0.35, 6.9), {
+		Size = Vector3.new(BODY_W - 0.2, 0.5, 1.2),
+		Color = Color3.fromRGB(18, 19, 24),
+		Material = Enum.Material.SmoothPlastic,
+	})
+	-- 듀얼 배기구 (뒤로 향한 실린더)
+	for _, sx in ipairs({ 1, -1 }) do
+		decor(model, seat, CFrame.new(sx * 1.3, -0.2, 7.5) * CFrame.Angles(0, math.rad(90), 0), {
+			Shape = Enum.PartType.Cylinder,
+			Size = Vector3.new(0.9, 0.62, 0.62),
+			Color = Color3.fromRGB(150, 152, 160),
+			Material = Enum.Material.Metal,
+		})
+	end
+	-- 풀폭 LED 테일라이트 바 (빨강 네온)
+	decor(model, seat, CFrame.new(0, 0.95, 7.45), {
+		Size = Vector3.new(BODY_W - 0.6, 0.4, 0.24),
+		Color = Color3.fromRGB(235, 45, 45),
+		Material = Enum.Material.Neon,
+	})
+
+	-- ── 리어 윙(대형 스포일러) ─────────────────────────────
+	for _, sx in ipairs({ 1, -1 }) do
+		decor(model, seat, CFrame.new(sx * (BODY_W / 2 - 0.5), 2.05, 6.5), {
+			Size = Vector3.new(0.3, 1.3, 1.9),
 			Color = trim,
 			Material = Enum.Material.Metal,
 		})
 	end
-	decor(model, seat, CFrame.new(0, 2.45, 6.7), {
-		Size = Vector3.new(BODY_W - 0.2, 0.28, 1.6),
+	decor(model, seat, CFrame.new(0, 2.65, 6.55) * CFrame.Angles(math.rad(-8), 0, 0), {
+		Size = Vector3.new(BODY_W + 0.3, 0.28, 1.7),
 		Color = darkBody,
 		Material = Enum.Material.SmoothPlastic,
 	})
 
-	-- 헤드라이트 (앞, 따뜻한 흰색 네온)
+	-- ── 레이싱 스트라이프(후드/데크, 운전석 영역은 피함) ──
+	local accent = Color3.fromRGB(245, 246, 250)
 	for _, sx in ipairs({ 1, -1 }) do
-		decor(model, seat, CFrame.new(sx * 2.4, 0.55, -7.45), {
-			Size = Vector3.new(1.2, 0.55, 0.3),
-			Color = Color3.fromRGB(255, 245, 200),
-			Material = Enum.Material.Neon,
+		decor(model, seat, CFrame.new(sx * 0.95, 1.46, -4.3), {
+			Size = Vector3.new(0.55, 0.08, 5.4),
+			Color = accent,
+			Material = Enum.Material.SmoothPlastic,
 		})
-	end
-	-- 테일라이트 (뒤, 빨강 네온)
-	for _, sx in ipairs({ 1, -1 }) do
-		decor(model, seat, CFrame.new(sx * 2.4, 0.7, 7.45), {
-			Size = Vector3.new(1.3, 0.5, 0.3),
-			Color = Color3.fromRGB(235, 45, 45),
-			Material = Enum.Material.Neon,
+		decor(model, seat, CFrame.new(sx * 0.95, 1.52, 4.7), {
+			Size = Vector3.new(0.55, 0.08, 4.4),
+			Color = accent,
+			Material = Enum.Material.SmoothPlastic,
 		})
 	end
 
@@ -257,11 +408,43 @@ function CarSpawner.build(carDef: any, custom: any?): Model
 	engine.Playing = true -- 서버에서 켜두면 모든 클라가 위치 기반으로 듣는다
 	engine.Parent = seat
 
+	-- 차 이름표: 차량 위에 떠 있는 BillboardGui (기본값 "박서우차")
+	local carName = (custom and type(custom.name) == "string" and custom.name ~= "") and custom.name or "박서우차"
+	local nameGui = Instance.new("BillboardGui")
+	nameGui.Name = "CarName"
+	nameGui.Size = UDim2.fromOffset(220, 52)
+	nameGui.StudsOffset = Vector3.new(0, 4.6, 0)
+	nameGui.AlwaysOnTop = false
+	nameGui.MaxDistance = 280
+	nameGui.LightInfluence = 0
+	nameGui.Adornee = seat
+	nameGui.Parent = seat
+	local nameBg = Instance.new("Frame")
+	nameBg.Size = UDim2.fromScale(1, 1)
+	nameBg.BackgroundColor3 = Color3.fromRGB(12, 14, 20)
+	nameBg.BackgroundTransparency = 0.35
+	nameBg.BorderSizePixel = 0
+	nameBg.Parent = nameGui
+	local nameCorner = Instance.new("UICorner")
+	nameCorner.CornerRadius = UDim.new(0.5, 0)
+	nameCorner.Parent = nameBg
+	local nameLabel = Instance.new("TextLabel")
+	nameLabel.Size = UDim2.fromScale(0.9, 0.74)
+	nameLabel.Position = UDim2.fromScale(0.05, 0.13)
+	nameLabel.BackgroundTransparency = 1
+	nameLabel.Text = carName
+	nameLabel.TextColor3 = Color3.fromRGB(245, 246, 250)
+	nameLabel.TextStrokeTransparency = 0.4
+	nameLabel.Font = Enum.Font.GothamBold
+	nameLabel.TextScaled = true
+	nameLabel.Parent = nameBg
+
 	-- 성능 스탯을 어트리뷰트로 부착 (클라 컨트롤러가 읽음)
 	seat:SetAttribute("TopSpeed", carDef.stats.topSpeed)
 	seat:SetAttribute("Accel", carDef.stats.accel)
 	seat:SetAttribute("Handling", carDef.stats.handling)
 	seat:SetAttribute("Grip", carDef.stats.grip)
+	seat:SetAttribute("WheelRadius", WHEEL_RADIUS) -- 클라 CarController 바퀴 굴림 계산용
 	model:SetAttribute("CarId", carDef.id)
 
 	return model

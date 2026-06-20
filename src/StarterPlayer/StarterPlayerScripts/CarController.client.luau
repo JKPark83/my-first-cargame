@@ -21,6 +21,14 @@ local player = Players.LocalPlayer
 local activeSeat: VehicleSeat? = nil
 local currentSpeed = 0 -- 현재 전진 속도(음수 = 후진)
 
+-- 바퀴 시각화 상태 (앞바퀴 조향 + 전체 바퀴 굴림)
+-- 시트에 Motor6D로 연결된 타이어들의 C0를 매 프레임 회전시킨다.
+local wheelMotors: { { motor: Motor6D, base: CFrame, front: boolean } } = {}
+local steerVisual = 0 -- 부드럽게 추종하는 현재 조향각(rad)
+local wheelSpin = 0 -- 누적 굴림 회전각(rad)
+local wheelRadius = 1.65
+local MAX_STEER = math.rad(28) -- 앞바퀴 최대 조향각
+
 -- 엔진 사운드: 속도에 비례해 피치/볼륨을 조절해 RPM 느낌을 낸다
 local function updateEngineSound(seat: VehicleSeat, speedRatio: number, boosting: boolean)
 	local engine = seat:FindFirstChild("Engine")
@@ -92,14 +100,58 @@ local function lerp(a: number, b: number, t: number): number
 	return a + (b - a) * t
 end
 
+-- 새 차량 탑승 시 바퀴 Motor6D들을 수집하고 기준 C0를 캐시
+local function cacheWheels(seat: VehicleSeat)
+	wheelMotors = {}
+	steerVisual = 0
+	wheelSpin = 0
+	wheelRadius = (seat:GetAttribute("WheelRadius") :: number?) or 1.65
+	for _, m in ipairs(seat:GetChildren()) do
+		if m:IsA("Motor6D") and m.Name == "WheelMotor" then
+			table.insert(wheelMotors, {
+				motor = m,
+				base = m.C0,
+				front = m:GetAttribute("FrontWheel") == true,
+			})
+		end
+	end
+end
+
+-- 매 프레임 바퀴 회전 갱신: 앞바퀴는 조향(Y) + 굴림(X), 뒷바퀴는 굴림(X)만
+local function updateWheels(steer: number, dt: number)
+	if #wheelMotors == 0 then
+		return
+	end
+	local targetSteer = -steer * MAX_STEER -- 조향 방향을 차체 회전과 일치
+	steerVisual = lerp(steerVisual, targetSteer, math.clamp(dt * 9, 0, 1))
+	-- 전진(currentSpeed>0) 시 바퀴가 앞으로 구르도록 누적
+	wheelSpin -= (currentSpeed * dt) / math.max(wheelRadius, 0.1)
+	if wheelSpin > math.pi * 2 or wheelSpin < -math.pi * 2 then
+		wheelSpin %= (math.pi * 2)
+	end
+	local spinCf = CFrame.Angles(wheelSpin, 0, 0)
+	local steerCf = CFrame.Angles(0, steerVisual, 0)
+	for _, w in ipairs(wheelMotors) do
+		if w.motor.Parent then
+			if w.front then
+				w.motor.C0 = w.base * steerCf * spinCf
+			else
+				w.motor.C0 = w.base * spinCf
+			end
+		end
+	end
+end
+
 RunService.Heartbeat:Connect(function(dt: number)
 	-- 매 프레임 활성 시트 갱신
 	local seat = findCarSeat()
 	if seat ~= activeSeat then
 		activeSeat = seat
 		currentSpeed = 0
+		wheelMotors = {}
 		if seat then
 			ensureEngineSound(seat) -- 새 차량 탑승 시 동작하는 엔진 사운드 선택
+			cacheWheels(seat) -- 바퀴 Motor6D 캐시
 		end
 	end
 	if not seat then
@@ -116,13 +168,50 @@ RunService.Heartbeat:Connect(function(dt: number)
 	local accel = (seat:GetAttribute("Accel") :: number) or 30
 	local handling = (seat:GetAttribute("Handling") :: number) or 0.65
 
-	-- 부스트 / 감속(오일) 효과 적용 (서버 시각 기준 어트리뷰트)
+	-- 효과 어트리뷰트 (서버 시각 기준)
 	local now = workspace:GetServerTimeNow()
 	local boostEnd = seat:GetAttribute("BoostEndTime") :: number?
 	local slowEnd = seat:GetAttribute("SlowEndTime") :: number?
-	local boosting = boostEnd ~= nil and now < boostEnd
+	local rocketEnd = seat:GetAttribute("RocketEndTime") :: number?
+	local spinEnd = seat:GetAttribute("SpinEndTime") :: number?
+	local freezeEnd = seat:GetAttribute("FreezeEndTime") :: number?
+
+	-- 물풍선에 맞음: 완전히 갇힘(정지 + 입력 무시)
+	if freezeEnd ~= nil and now < freezeEnd then
+		currentSpeed = 0
+		local vy = seat.AssemblyLinearVelocity.Y
+		seat.AssemblyLinearVelocity = Vector3.new(0, vy, 0)
+		seat.AssemblyAngularVelocity = Vector3.zero
+		updateWheels(0, dt)
+		updateEngineSound(seat, 0, false)
+		return
+	end
+
+	-- 바나나를 밟음: 빙글빙글 미끄러짐(주행/조향 불가)
+	if spinEnd ~= nil and now < spinEnd then
+		currentSpeed = lerp(currentSpeed, 0, math.clamp(dt * 2.5, 0, 1))
+		local cf = seat.CFrame
+		local horizontal = Vector3.new(cf.LookVector.X, 0, cf.LookVector.Z)
+		if horizontal.Magnitude > 0 then
+			horizontal = horizontal.Unit
+		end
+		local vy = seat.AssemblyLinearVelocity.Y
+		seat.AssemblyLinearVelocity = Vector3.new(horizontal.X * currentSpeed, vy, horizontal.Z * currentSpeed)
+		seat.AssemblyAngularVelocity = Vector3.new(0, 9, 0) -- 강하게 회전(스핀아웃)
+		updateWheels(1, dt)
+		updateEngineSound(seat, 0.2, false)
+		return
+	end
+
+	-- 부스트(패드) / 로켓(아이템) / 감속(오일) 적용
+	local boostingPad = boostEnd ~= nil and now < boostEnd
+	local rocketing = rocketEnd ~= nil and now < rocketEnd
 	local slowed = slowEnd ~= nil and now < slowEnd
-	if boosting then
+	local boosting = boostingPad or rocketing -- 엔진 사운드 가속 연출용
+	if rocketing then
+		topSpeed *= GameConfig.Items.rocket.speedMultiplier
+		accel *= GameConfig.Items.rocket.accelMultiplier
+	elseif boostingPad then
 		topSpeed *= GameConfig.Boost.speedMultiplier
 		accel *= GameConfig.Boost.accelMultiplier
 	end
@@ -170,6 +259,9 @@ RunService.Heartbeat:Connect(function(dt: number)
 	local turnRate = handling * 2.6 * (0.25 + 0.75 * speedFactor)
 	local direction = currentSpeed >= 0 and 1 or -1
 	seat.AssemblyAngularVelocity = Vector3.new(0, -steer * turnRate * direction, 0)
+
+	-- 앞바퀴 조향 + 전체 바퀴 굴림 시각화
+	updateWheels(steer, dt)
 
 	-- 엔진 사운드 갱신 (속도 비례 피치/볼륨)
 	updateEngineSound(seat, speedFactor, boosting)

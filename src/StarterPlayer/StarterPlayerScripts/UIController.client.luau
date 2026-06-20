@@ -16,6 +16,8 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
 
 local GameConfig = require(ReplicatedStorage.GameConfig)
 local Remotes = require(ReplicatedStorage.Remotes)
@@ -60,6 +62,121 @@ local gui = make("ScreenGui", {
 	ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
 	IgnoreGuiInset = true,
 }, playerGui)
+
+-- =====================================================================
+-- 로딩 오버레이 (경주 진입 / 차고 준비)
+--   별도 ScreenGui(높은 DisplayOrder)로 다른 모든 UI 위에 덮어 표시.
+--   CanvasGroup의 GroupTransparency로 카드+배경을 한 번에 페이드.
+-- =====================================================================
+local loadingGui = make("ScreenGui", {
+	Name = "LoadingUI",
+	ResetOnSpawn = false,
+	DisplayOrder = 100,
+	IgnoreGuiInset = true,
+	ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+}, playerGui)
+
+local loadingRoot = make("CanvasGroup", {
+	Name = "Overlay",
+	Size = UDim2.fromScale(1, 1),
+	BackgroundColor3 = Color3.fromRGB(10, 12, 18),
+	BackgroundTransparency = 0,
+	GroupTransparency = 0,
+	BorderSizePixel = 0,
+	Visible = false,
+	ZIndex = 1,
+}, loadingGui)
+
+local loadingCard = make("Frame", {
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.fromScale(0.5, 0.5),
+	Size = UDim2.new(0, 440, 0, 170),
+	BackgroundTransparency = 1,
+}, loadingRoot)
+
+local loadingTitle = make("TextLabel", {
+	Size = UDim2.new(1, 0, 0, 56),
+	BackgroundTransparency = 1,
+	Text = "🏁 트랙 생성 중...",
+	TextColor3 = Color3.fromRGB(245, 246, 250),
+	Font = Enum.Font.GothamBold,
+	TextScaled = true,
+}, loadingCard)
+
+local loadingSub = make("TextLabel", {
+	Size = UDim2.new(1, 0, 0, 30),
+	Position = UDim2.new(0, 0, 0, 64),
+	BackgroundTransparency = 1,
+	Text = "잠시만 기다려 주세요",
+	TextColor3 = Color3.fromRGB(150, 156, 170),
+	Font = Enum.Font.Gotham,
+	TextScaled = true,
+}, loadingCard)
+
+-- 불확정 진행 바: 좌우로 왕복하는 스윕
+local loadingBarBg = make("Frame", {
+	AnchorPoint = Vector2.new(0.5, 0),
+	Position = UDim2.new(0.5, 0, 0, 120),
+	Size = UDim2.new(0, 380, 0, 8),
+	BackgroundColor3 = Color3.fromRGB(35, 39, 50),
+	BorderSizePixel = 0,
+	ClipsDescendants = true,
+}, loadingCard)
+corner(4, loadingBarBg)
+local loadingBarFill = make("Frame", {
+	Size = UDim2.new(0.32, 0, 1, 0),
+	BackgroundColor3 = Color3.fromRGB(90, 170, 255),
+	BorderSizePixel = 0,
+}, loadingBarBg)
+corner(4, loadingBarFill)
+
+local loadingTween: Tween? = nil
+local loadingFade: Tween? = nil
+
+local function showLoading(title: string?, subtitle: string?)
+	loadingTitle.Text = title or "🏁 트랙 생성 중..."
+	loadingSub.Text = subtitle or "잠시만 기다려 주세요"
+	if loadingFade then
+		loadingFade:Cancel()
+		loadingFade = nil
+	end
+	loadingRoot.GroupTransparency = 0
+	loadingRoot.Visible = true
+	-- 스윕 시작(중복 방지)
+	if not loadingTween then
+		loadingBarFill.Position = UDim2.new(0, 0, 0, 0)
+		local t = TweenService:Create(
+			loadingBarFill,
+			TweenInfo.new(0.85, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut, -1, true),
+			{ Position = UDim2.new(0.68, 0, 0, 0) }
+		)
+		loadingTween = t
+		t:Play()
+	end
+end
+
+local function hideLoading()
+	if not loadingRoot.Visible then
+		return
+	end
+	if loadingTween then
+		loadingTween:Cancel()
+		loadingTween = nil
+	end
+	if loadingFade then
+		loadingFade:Cancel()
+	end
+	local fade = TweenService:Create(loadingRoot, TweenInfo.new(0.35, Enum.EasingStyle.Quad), {
+		GroupTransparency = 1,
+	})
+	loadingFade = fade
+	fade.Completed:Connect(function(state)
+		if state == Enum.PlaybackState.Completed then
+			loadingRoot.Visible = false
+		end
+	end)
+	fade:Play()
+end
 
 -- ---------------------------------------------------------------------
 -- 상단바 (머니)
@@ -315,8 +432,8 @@ make("UIPadding", { PaddingTop = UDim.new(0, 8), PaddingBottom = UDim.new(0, 8) 
 -- 커스터마이징 패널 (30초 타이머)
 -- =====================================================================
 local customFrame = make("Frame", {
-	Size = UDim2.new(0, 520, 0, 440),
-	Position = UDim2.new(0.5, -260, 0.5, -220),
+	Size = UDim2.new(0, 540, 0, 588),
+	Position = UDim2.new(0.5, -270, 0.5, -294),
 	BackgroundColor3 = Color3.fromRGB(22, 25, 34),
 	Visible = false,
 }, gui)
@@ -351,9 +468,10 @@ local editState = {
 	neonColor = { 0, 0, 0 },
 	sticker = "none",
 	plate = "RACER",
+	name = "박서우차",
 }
 
--- 색상 스와치 행 생성
+-- 색상 스와치 행 생성 (휠/네온 프리셋)
 local function buildSwatchRow(title: string, palette: { Color3 }, yPos: number, field: string)
 	make("TextLabel", {
 		Size = UDim2.new(0, 90, 0, 30),
@@ -368,12 +486,12 @@ local function buildSwatchRow(title: string, palette: { Color3 }, yPos: number, 
 
 	for i, c in ipairs(palette) do
 		local sw = make("TextButton", {
-			Size = UDim2.new(0, 36, 0, 36),
-			Position = UDim2.new(0, 110 + (i - 1) * 44, 0, yPos - 2),
+			Size = UDim2.new(0, 34, 0, 34),
+			Position = UDim2.new(0, 104 + (i - 1) * 42, 0, yPos - 2),
 			BackgroundColor3 = c,
 			Text = "",
 		}, customFrame)
-		corner(18, sw)
+		corner(17, sw)
 		make("UIStroke", { Color = Color3.fromRGB(255, 255, 255), Thickness = 1, Transparency = 0.6 }, sw)
 		sw.Activated:Connect(function()
 			(editState :: any)[field] = { math.floor(c.R * 255), math.floor(c.G * 255), math.floor(c.B * 255) }
@@ -381,14 +499,159 @@ local function buildSwatchRow(title: string, palette: { Color3 }, yPos: number, 
 	end
 end
 
-buildSwatchRow("차체", GameConfig.Customization.bodyColors, 70, "bodyColor")
-buildSwatchRow("휠", GameConfig.Customization.wheelColors, 120, "wheelColor")
-buildSwatchRow("네온", GameConfig.Customization.neonColors, 170, "neonColor")
+-- =====================================================================
+-- 차체 자유 색상 선택기: 무지개(색상) 막대 + 밝기 막대 + 실시간 미리보기
+--   HSV 모델로 색상(Hue)·밝기(Value)를 자유롭게 조절해 임의 RGB를 만든다.
+-- =====================================================================
+make("TextLabel", {
+	Size = UDim2.new(0, 300, 0, 24),
+	Position = UDim2.new(0, 16, 0, 58),
+	BackgroundTransparency = 1,
+	Text = "차체 색상 🎨 (무지개 + 밝기)",
+	TextColor3 = Color3.fromRGB(210, 215, 225),
+	Font = Enum.Font.GothamMedium,
+	TextScaled = true,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, customFrame)
+
+-- 무지개(색상) 막대
+local hueBar = make("Frame", {
+	Size = UDim2.new(0, 358, 0, 26),
+	Position = UDim2.new(0, 16, 0, 88),
+	BackgroundColor3 = Color3.fromRGB(255, 255, 255),
+	BorderSizePixel = 0,
+	Active = true,
+}, customFrame)
+corner(6, hueBar)
+make("UIGradient", {
+	Color = ColorSequence.new({
+		ColorSequenceKeypoint.new(0.0, Color3.fromHSV(0.0, 1, 1)),
+		ColorSequenceKeypoint.new(0.1667, Color3.fromHSV(0.1667, 1, 1)),
+		ColorSequenceKeypoint.new(0.3333, Color3.fromHSV(0.3333, 1, 1)),
+		ColorSequenceKeypoint.new(0.5, Color3.fromHSV(0.5, 1, 1)),
+		ColorSequenceKeypoint.new(0.6667, Color3.fromHSV(0.6667, 1, 1)),
+		ColorSequenceKeypoint.new(0.8333, Color3.fromHSV(0.8333, 1, 1)),
+		ColorSequenceKeypoint.new(1.0, Color3.fromHSV(1.0, 1, 1)),
+	}),
+}, hueBar)
+local hueSelector = make("Frame", {
+	Size = UDim2.new(0, 4, 1, 6),
+	Position = UDim2.new(0, 0, 0, 0),
+	AnchorPoint = Vector2.new(0.5, 0),
+	BackgroundColor3 = Color3.fromRGB(255, 255, 255),
+	BorderSizePixel = 0,
+	ZIndex = 3,
+}, hueBar)
+make("UIStroke", { Color = Color3.fromRGB(20, 20, 20), Thickness = 1.5 }, hueSelector)
+
+-- 밝기 막대 (검정 → 현재 색상)
+local valBar = make("Frame", {
+	Size = UDim2.new(0, 358, 0, 20),
+	Position = UDim2.new(0, 16, 0, 122),
+	BackgroundColor3 = Color3.fromRGB(255, 255, 255),
+	BorderSizePixel = 0,
+	Active = true,
+}, customFrame)
+corner(6, valBar)
+local valGradient = make("UIGradient", {
+	Color = ColorSequence.new(Color3.fromRGB(0, 0, 0), Color3.fromHSV(0, 1, 1)),
+}, valBar)
+local valSelector = make("Frame", {
+	Size = UDim2.new(0, 4, 1, 6),
+	Position = UDim2.new(1, 0, 0, 0),
+	AnchorPoint = Vector2.new(0.5, 0),
+	BackgroundColor3 = Color3.fromRGB(255, 255, 255),
+	BorderSizePixel = 0,
+	ZIndex = 3,
+}, valBar)
+make("UIStroke", { Color = Color3.fromRGB(20, 20, 20), Thickness = 1.5 }, valSelector)
+
+-- 실시간 미리보기 스와치
+local bodyPreview = make("Frame", {
+	Size = UDim2.new(0, 128, 0, 56),
+	Position = UDim2.new(0, 386, 0, 88),
+	BackgroundColor3 = Color3.fromRGB(255, 255, 255),
+	BorderSizePixel = 0,
+}, customFrame)
+corner(10, bodyPreview)
+make("UIStroke", { Color = Color3.fromRGB(255, 255, 255), Thickness = 1.5, Transparency = 0.4 }, bodyPreview)
+make("TextLabel", {
+	Size = UDim2.new(0, 128, 0, 16),
+	Position = UDim2.new(0, 386, 0, 146),
+	BackgroundTransparency = 1,
+	Text = "미리보기",
+	TextColor3 = Color3.fromRGB(150, 156, 170),
+	Font = Enum.Font.Gotham,
+	TextScaled = true,
+}, customFrame)
+
+-- 색상 상태 (Hue 0~1, Value 0~1; 채도는 선명하게 1 고정)
+local bodyHue = 0
+local bodyVal = 1
+
+-- 미리보기/선택자 위치 갱신 (editState.bodyColor는 건드리지 않음 → 불러오기 시 원색 유지)
+local function refreshBodyPreview()
+	bodyPreview.BackgroundColor3 = color3FromArray(editState.bodyColor, Color3.fromRGB(255, 255, 255))
+	hueSelector.Position = UDim2.new(bodyHue, 0, 0, -3)
+	valSelector.Position = UDim2.new(bodyVal, 0, 0, -3)
+	valGradient.Color = ColorSequence.new(Color3.fromRGB(0, 0, 0), Color3.fromHSV(bodyHue, 1, 1))
+end
+
+-- 막대 조작 시: 현재 Hue/Value로 차체 색을 새로 만든다
+local function setBodyFromPicker()
+	local c = Color3.fromHSV(bodyHue, 1, bodyVal)
+	editState.bodyColor = {
+		math.floor(c.R * 255 + 0.5),
+		math.floor(c.G * 255 + 0.5),
+		math.floor(c.B * 255 + 0.5),
+	}
+	bodyPreview.BackgroundColor3 = c
+	hueSelector.Position = UDim2.new(bodyHue, 0, 0, -3)
+	valSelector.Position = UDim2.new(bodyVal, 0, 0, -3)
+	valGradient.Color = ColorSequence.new(Color3.fromRGB(0, 0, 0), Color3.fromHSV(bodyHue, 1, 1))
+end
+
+-- 가로 슬라이더: 막대를 클릭/드래그하면 0~1 비율을 onChange로 전달
+local function attachHorizontalSlider(bar: GuiObject, onChange: (number) -> ())
+	local dragging = false
+	local function update(px: number)
+		local rel = (px - bar.AbsolutePosition.X) / math.max(bar.AbsoluteSize.X, 1)
+		onChange(math.clamp(rel, 0, 1))
+	end
+	bar.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			update(input.Position.X)
+		end
+	end)
+	bar.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = false
+		end
+	end)
+	UserInputService.InputChanged:Connect(function(input)
+		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+			update(input.Position.X)
+		end
+	end)
+end
+
+attachHorizontalSlider(hueBar, function(t)
+	bodyHue = t
+	setBodyFromPicker()
+end)
+attachHorizontalSlider(valBar, function(t)
+	bodyVal = t
+	setBodyFromPicker()
+end)
+
+buildSwatchRow("휠", GameConfig.Customization.wheelColors, 174, "wheelColor")
+buildSwatchRow("네온", GameConfig.Customization.neonColors, 218, "neonColor")
 
 -- 스티커 선택
 make("TextLabel", {
 	Size = UDim2.new(0, 90, 0, 30),
-	Position = UDim2.new(0, 14, 0, 220),
+	Position = UDim2.new(0, 14, 0, 264),
 	BackgroundTransparency = 1,
 	Text = "스티커",
 	TextColor3 = Color3.fromRGB(210, 215, 225),
@@ -399,7 +662,7 @@ make("TextLabel", {
 for i, s in ipairs(GameConfig.Customization.stickers) do
 	local btn = make("TextButton", {
 		Size = UDim2.new(0, 90, 0, 34),
-		Position = UDim2.new(0, 110 + (i - 1) * 98, 0, 218),
+		Position = UDim2.new(0, 110 + (i - 1) * 98, 0, 262),
 		BackgroundColor3 = Color3.fromRGB(45, 50, 65),
 		Text = s.displayName,
 		TextColor3 = Color3.fromRGB(255, 255, 255),
@@ -413,10 +676,43 @@ for i, s in ipairs(GameConfig.Customization.stickers) do
 	end)
 end
 
+-- 차 이름 입력 (차량 위 이름표, 기본값 "박서우차")
+make("TextLabel", {
+	Size = UDim2.new(0, 90, 0, 30),
+	Position = UDim2.new(0, 14, 0, 314),
+	BackgroundTransparency = 1,
+	Text = "차 이름",
+	TextColor3 = Color3.fromRGB(210, 215, 225),
+	Font = Enum.Font.GothamMedium,
+	TextScaled = true,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, customFrame)
+local nameBox = make("TextBox", {
+	Size = UDim2.new(0, 280, 0, 34),
+	Position = UDim2.new(0, 110, 0, 312),
+	BackgroundColor3 = Color3.fromRGB(245, 245, 245),
+	Text = "박서우차",
+	PlaceholderText = "박서우차",
+	TextColor3 = Color3.fromRGB(20, 20, 20),
+	Font = Enum.Font.GothamBold,
+	TextScaled = true,
+	ClearTextOnFocus = false,
+}, customFrame)
+corner(6, nameBox)
+nameBox.FocusLost:Connect(function()
+	local cleaned = string.gsub(nameBox.Text, "%c", "")
+	cleaned = string.match(cleaned, "^%s*(.-)%s*$") or ""
+	if cleaned == "" then
+		cleaned = "박서우차"
+	end
+	nameBox.Text = cleaned
+	editState.name = cleaned
+end)
+
 -- 번호판 입력
 make("TextLabel", {
 	Size = UDim2.new(0, 90, 0, 30),
-	Position = UDim2.new(0, 14, 0, 270),
+	Position = UDim2.new(0, 14, 0, 358),
 	BackgroundTransparency = 1,
 	Text = "번호판",
 	TextColor3 = Color3.fromRGB(210, 215, 225),
@@ -426,7 +722,7 @@ make("TextLabel", {
 }, customFrame)
 local plateBox = make("TextBox", {
 	Size = UDim2.new(0, 200, 0, 34),
-	Position = UDim2.new(0, 110, 0, 268),
+	Position = UDim2.new(0, 110, 0, 356),
 	BackgroundColor3 = Color3.fromRGB(245, 245, 245),
 	Text = "RACER",
 	PlaceholderText = "최대 8자",
@@ -475,6 +771,7 @@ local function sendCustomization()
 		neonColor = editState.neonColor,
 		sticker = editState.sticker,
 		plate = editState.plate,
+		name = editState.name,
 	})
 end
 
@@ -503,14 +800,24 @@ local function openCustomize()
 		editState.neonColor = existing.neonColor or editState.neonColor
 		editState.sticker = existing.sticker or "none"
 		editState.plate = existing.plate or "RACER"
+		editState.name = (type(existing.name) == "string" and existing.name ~= "") and existing.name or "박서우차"
 	elseif carDef then
 		editState.bodyColor = { math.floor(carDef.defaultColor.R * 255), math.floor(carDef.defaultColor.G * 255), math.floor(carDef.defaultColor.B * 255) }
 		editState.wheelColor = { 20, 20, 20 }
 		editState.neonColor = { 0, 0, 0 }
 		editState.sticker = "none"
 		editState.plate = "RACER"
+		editState.name = "박서우차"
 	end
 	plateBox.Text = editState.plate
+	nameBox.Text = editState.name
+
+	-- 색상 막대를 현재 차체색 기준으로 초기화 (원색 유지: editState.bodyColor는 변경하지 않음)
+	local bc = color3FromArray(editState.bodyColor, Color3.fromRGB(255, 255, 255))
+	local h, _, v = bc:ToHSV()
+	bodyHue = h
+	bodyVal = v
+	refreshBodyPreview()
 
 	garageFrame.Visible = false
 	customFrame.Visible = true
@@ -822,7 +1129,22 @@ RunService.RenderStepped:Connect(function()
 	local now = workspace:GetServerTimeNow()
 	local boostEnd = seat:GetAttribute("BoostEndTime") :: number?
 	local slowEnd = seat:GetAttribute("SlowEndTime") :: number?
-	if boostEnd and now < boostEnd then
+	local rocketEnd = seat:GetAttribute("RocketEndTime") :: number?
+	local spinEnd = seat:GetAttribute("SpinEndTime") :: number?
+	local freezeEnd = seat:GetAttribute("FreezeEndTime") :: number?
+	if freezeEnd and now < freezeEnd then
+		statusIndicator.Visible = true
+		statusIndicator.Text = "💧 갇힘!"
+		statusIndicator.TextColor3 = Color3.fromRGB(90, 190, 255)
+	elseif spinEnd and now < spinEnd then
+		statusIndicator.Visible = true
+		statusIndicator.Text = "🍌 빙글빙글!"
+		statusIndicator.TextColor3 = Color3.fromRGB(255, 230, 70)
+	elseif rocketEnd and now < rocketEnd then
+		statusIndicator.Visible = true
+		statusIndicator.Text = "🚀 로켓!"
+		statusIndicator.TextColor3 = Color3.fromRGB(255, 120, 90)
+	elseif boostEnd and now < boostEnd then
 		statusIndicator.Visible = true
 		statusIndicator.Text = "🚀 부스트!"
 		statusIndicator.TextColor3 = Color3.fromRGB(90, 230, 255)
@@ -834,6 +1156,96 @@ RunService.RenderStepped:Connect(function()
 		statusIndicator.Visible = false
 	end
 end)
+
+-- =====================================================================
+-- 아이템 슬롯 HUD (박스 획득 → [Q]/버튼으로 사용)
+-- =====================================================================
+local ITEM_INFO: { [string]: { emoji: string, name: string, color: Color3 } } = {
+	banana = { emoji = "🍌", name = "바나나", color = Color3.fromRGB(255, 230, 70) },
+	rocket = { emoji = "🚀", name = "로켓", color = Color3.fromRGB(255, 120, 90) },
+	balloon = { emoji = "💧", name = "물풍선", color = Color3.fromRGB(90, 190, 255) },
+}
+local currentItem: string? = nil
+
+local itemSlot = make("Frame", {
+	Size = UDim2.new(0, 132, 0, 132),
+	Position = UDim2.new(1, -148, 1, -148),
+	BackgroundColor3 = Color3.fromRGB(20, 24, 34),
+	BackgroundTransparency = 0.1,
+	Visible = false,
+}, gui)
+corner(16, itemSlot)
+local itemStroke = make("UIStroke", { Color = Color3.fromRGB(120, 130, 150), Thickness = 3 }, itemSlot)
+local itemEmoji = make("TextLabel", {
+	Size = UDim2.new(1, 0, 0, 66),
+	Position = UDim2.new(0, 0, 0, 8),
+	BackgroundTransparency = 1,
+	Text = "",
+	TextScaled = true,
+	Font = Enum.Font.GothamBold,
+}, itemSlot)
+local itemName = make("TextLabel", {
+	Size = UDim2.new(1, 0, 0, 20),
+	Position = UDim2.new(0, 0, 0, 72),
+	BackgroundTransparency = 1,
+	Text = "",
+	TextColor3 = Color3.fromRGB(240, 245, 255),
+	Font = Enum.Font.GothamBold,
+	TextScaled = true,
+}, itemSlot)
+local itemUseBtn = make("TextButton", {
+	Size = UDim2.new(1, -16, 0, 26),
+	Position = UDim2.new(0, 8, 1, -32),
+	BackgroundColor3 = Color3.fromRGB(70, 170, 90),
+	Text = "사용 [Q]",
+	TextColor3 = Color3.fromRGB(255, 255, 255),
+	Font = Enum.Font.GothamBold,
+	TextScaled = true,
+	AutoButtonColor = true,
+}, itemSlot)
+corner(8, itemUseBtn)
+
+local function refreshItemSlot()
+	local info = currentItem and ITEM_INFO[currentItem]
+	if info then
+		itemSlot.Visible = true
+		itemEmoji.Text = info.emoji
+		itemName.Text = info.name
+		itemStroke.Color = info.color
+	else
+		itemSlot.Visible = false
+	end
+end
+
+local function tryUseItem()
+	if currentItem then
+		Remotes.Event("RequestUseItem"):FireServer()
+	end
+end
+
+itemUseBtn.Activated:Connect(tryUseItem)
+
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+	if gameProcessed then
+		return
+	end
+	if input.KeyCode == Enum.KeyCode.Q then
+		tryUseItem()
+	end
+end)
+
+-- 보유 아이템 변경 수신
+Remotes.Event("ItemUpdated").OnClientEvent:Connect(function(itemId)
+	if itemId == "none" or itemId == nil then
+		currentItem = nil
+	else
+		currentItem = itemId
+	end
+	refreshItemSlot()
+end)
+
+-- 아이템 발동 연출 훅(현재는 statusIndicator + 서버 스폰 파트로 처리)
+Remotes.Event("ItemEffect").OnClientEvent:Connect(function(_info) end)
 
 -- =====================================================================
 -- 리더보드 패널
@@ -948,11 +1360,32 @@ end)
 -- =====================================================================
 -- 버튼/이벤트 연결
 -- =====================================================================
-garageBtn.Activated:Connect(function()
-	garageFrame.Visible = not garageFrame.Visible
-	customizeOpenBtn.Visible = garageFrame.Visible
+-- 차고 열기: 데이터가 준비될 때까지 로딩 화면을 띄운 뒤 공개
+local function revealGarage()
+	garageFrame.Visible = true
+	customizeOpenBtn.Visible = true
+	customFrame.Visible = false
+end
+
+local function openGarageWithLoading()
 	if garageFrame.Visible then
+		return -- 이미 열려 있으면 무시
+	end
+	-- 차고를 먼저 확실히 연다(데이터 유무와 무관) → 그 위에 짧은 로딩 연출을 덮었다가 사라지게.
+	-- 카드 내용은 데이터 도착 시 PlayerDataUpdated → refreshUI 로 채워진다.
+	revealGarage()
+	showLoading("🚗 차고지 준비 중...", "차량 정보를 불러오고 있어요")
+	task.delay(0.5, hideLoading)
+end
+
+garageBtn.Activated:Connect(function()
+	if garageFrame.Visible then
+		-- 닫기
+		garageFrame.Visible = false
+		customizeOpenBtn.Visible = false
 		customFrame.Visible = false
+	else
+		openGarageWithLoading()
 	end
 end)
 garageClose.Activated:Connect(function()
@@ -1033,6 +1466,9 @@ Remotes.Event("RaceStateChanged").OnClientEvent:Connect(function(info)
 		customizeOpenBtn.Visible = false
 		lbFrame.Visible = false
 		queueStatus.Visible = false
+		-- 새 경주 시작: 아이템 슬롯 초기화
+		currentItem = nil
+		refreshItemSlot()
 	else
 		-- 라운지 복귀: 버튼 복원 + HUD 정리
 		setLobbyButtonsVisible(true)
@@ -1042,7 +1478,27 @@ Remotes.Event("RaceStateChanged").OnClientEvent:Connect(function(info)
 		minimap.Visible = false
 		rankHud.Visible = false
 		statusIndicator.Visible = false
+		currentItem = nil
+		refreshItemSlot()
 		clearMinimap()
+	end
+end)
+
+-- 경주 진입 로딩 화면 ON/OFF (서버가 트랙 생성/순간이동 히치를 가리기 위해 제어)
+local raceLoadSeq = 0
+Remotes.Event("RaceLoading").OnClientEvent:Connect(function(active)
+	raceLoadSeq += 1
+	if active then
+		local seq = raceLoadSeq
+		showLoading("🏁 트랙 생성 중...", "출발 준비를 하고 있어요")
+		-- 안전 타임아웃: 해제 신호 유실 대비(8초 후 강제 해제)
+		task.delay(8, function()
+			if seq == raceLoadSeq and loadingRoot.Visible then
+				hideLoading()
+			end
+		end)
+	else
+		hideLoading()
 	end
 end)
 
@@ -1064,6 +1520,8 @@ Remotes.Event("RaceProgress").OnClientEvent:Connect(function(info)
 end)
 
 Remotes.Event("RaceCountdown").OnClientEvent:Connect(function(info)
+	raceLoadSeq += 1 -- 진행 중 로딩 타임아웃 무효화
+	hideLoading() -- 안전망: 카운트다운 시작 시 로딩이 남아있으면 해제
 	if info.value and info.value > 0 then
 		flashBig(tostring(info.value))
 	else
@@ -1083,6 +1541,11 @@ Remotes.Event("LeaderboardUpdated").OnClientEvent:Connect(function(top)
 	if lbFrame.Visible then
 		renderLeaderboard(top or {}, data and data.stats and data.stats.bestTime or 0)
 	end
+end)
+
+-- 차량 선택 패드 진입 → 서버 신호로 차고 UI 열기 (차고 버튼과 동일 동작, 로딩 포함)
+Remotes.Event("OpenGarageUI").OnClientEvent:Connect(function()
+	openGarageWithLoading()
 end)
 
 -- =====================================================================

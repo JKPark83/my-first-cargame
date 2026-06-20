@@ -36,6 +36,7 @@ type RacerState = {
 	finished: boolean,
 	finishTime: number?,
 	place: number?,
+	item: string?, -- 보유 중인 아이템 id (없으면 nil)
 }
 
 local state = "Idle"
@@ -77,6 +78,11 @@ end
 
 local function notify(player: Player, message: string)
 	Remotes.Event("Notify"):FireClient(player, message)
+end
+
+-- 현재 경주가 진행 중인지(외부 모듈에서 조회). state는 모듈 로컬이라 getter로 노출.
+function RaceManager.isRacing(): boolean
+	return state == "Racing"
 end
 
 -- =====================================================================
@@ -180,6 +186,13 @@ function RaceManager.startRace()
 		return
 	end
 
+	-- 진입 로딩 화면 ON: 트랙 생성(수백 파트)과 차량 스폰/순간이동 히치를 가린다.
+	-- 한 프레임 양보해 로딩 신호가 무거운 동기 빌드보다 먼저 전송되게 함.
+	for _, p in ipairs(participants) do
+		Remotes.Event("RaceLoading"):FireClient(p, true)
+	end
+	task.wait()
+
 	-- 랜덤 트랙 선택 및 생성
 	local trackIndex = math.random(1, GameConfig.Race.trackCount)
 	local trackFolder = Instance.new("Folder")
@@ -221,6 +234,13 @@ function RaceManager.startRace()
 	-- 경주 시작 카운트다운(3,2,1,GO) 동안 차량 고정
 	RaceManager.freezeCars(true)
 	task.spawn(function()
+		-- 진입 로딩 화면을 잠시 더 유지해 트랙 파트 복제까지 가린 뒤 해제 → 트랙이 보이고 카운트다운 시작
+		task.wait(GameConfig.Race.entryLoadTime)
+		for _, p in ipairs(participants) do
+			if p.Parent then
+				Remotes.Event("RaceLoading"):FireClient(p, false)
+			end
+		end
 		for n = 3, 1, -1 do
 			Remotes.Event("RaceCountdown"):FireAllClients({ value = n, track = track.displayName })
 			task.wait(1)
@@ -258,7 +278,265 @@ local function findCarModel(hit: BasePart): Model?
 	return nil
 end
 
--- 부스트 패드 / 오일 슬릭에 Touched 핸들러 연결
+-- =====================================================================
+-- 아이템 시스템 (마리오카트식): 박스 획득 + 바나나/로켓/물풍선 사용
+-- 효과는 차량 시트의 어트리뷰트(종료 시각)로 전달되어 클라 CarController가 반영
+-- =====================================================================
+
+-- 닿은 파트로부터 소속 레이서 상태를 찾음
+local function racerFromHit(hit: BasePart): RacerState?
+	local car = findCarModel(hit)
+	if not car then
+		return nil
+	end
+	local userId = car:GetAttribute("OwnerUserId")
+	if typeof(userId) ~= "number" then
+		return nil
+	end
+	return racers[userId]
+end
+
+-- 가중치 랜덤으로 아이템 1개 선택
+local function pickRandomItem(): string
+	local pool = GameConfig.Items.pool
+	local total = 0
+	for _, e in ipairs(pool) do
+		total += e.weight
+	end
+	local r = math.random() * total
+	local acc = 0
+	for _, e in ipairs(pool) do
+		acc += e.weight
+		if r <= acc then
+			return e.id
+		end
+	end
+	return pool[1].id
+end
+
+-- 박스 표시(?) 토글
+local function setBoxVisible(box: BasePart, visible: boolean)
+	box.Transparency = visible and 0.2 or 1
+	for _, c in ipairs(box:GetChildren()) do
+		if c:IsA("BillboardGui") or c:IsA("SurfaceGui") then
+			c.Enabled = visible
+		end
+	end
+end
+
+-- 아이템 박스 통과 처리: 비어 있으면 랜덤 지급 + 박스 일시 비활성화 후 재생성
+local function onItemBoxTouched(box: BasePart, racer: RacerState)
+	if not box:GetAttribute("Active") then
+		return
+	end
+	if racer.item then
+		return -- 이미 보유 중이면 받지 않음
+	end
+	box:SetAttribute("Active", false)
+	setBoxVisible(box, false)
+
+	local itemId = pickRandomItem()
+	racer.item = itemId
+	Remotes.Event("ItemUpdated"):FireClient(racer.player, itemId)
+
+	task.delay(GameConfig.Items.boxRespawnTime, function()
+		if box.Parent and state == "Racing" then
+			box:SetAttribute("Active", true)
+			setBoxVisible(box, true)
+		end
+	end)
+end
+
+local function itemParent(): Instance
+	local t = currentTrack
+	if t and t.model and t.model.Parent then
+		return t.model
+	end
+	return workspace
+end
+
+-- 바나나: 차 뒤에 떨어뜨려 두고, 밟은 차량을 회전(미끄러짐)시킴
+local function dropBanana(racer: RacerState)
+	local car = racer.car
+	if not car or not car.PrimaryPart then
+		return
+	end
+	local cfg = GameConfig.Items.banana
+	local seat = car.PrimaryPart
+	local dropPos = (seat.CFrame * CFrame.new(0, -0.4, cfg.dropBackOffset)).Position
+
+	local banana = Instance.new("Part")
+	banana.Name = "Banana"
+	banana.Shape = Enum.PartType.Ball
+	banana.Anchored = true
+	banana.CanCollide = false
+	banana.Size = Vector3.new(2.8, 2.8, 2.8)
+	banana.Color = cfg.color
+	banana.Material = Enum.Material.SmoothPlastic
+	banana.CFrame = CFrame.new(dropPos)
+	banana.Parent = itemParent()
+
+	local bb = Instance.new("BillboardGui")
+	bb.Size = UDim2.fromOffset(42, 42)
+	bb.StudsOffset = Vector3.new(0, 1.6, 0)
+	bb.Adornee = banana
+	bb.Parent = banana
+	local lbl = Instance.new("TextLabel")
+	lbl.Size = UDim2.fromScale(1, 1)
+	lbl.BackgroundTransparency = 1
+	lbl.Text = cfg.emoji
+	lbl.TextScaled = true
+	lbl.Parent = bb
+
+	local placedAt = workspace:GetServerTimeNow()
+	local consumed = false
+	banana.Touched:Connect(function(hit)
+		if consumed or state ~= "Racing" then
+			return
+		end
+		local victim = racerFromHit(hit)
+		if not victim or not victim.car or not victim.car.PrimaryPart then
+			return
+		end
+		local now = workspace:GetServerTimeNow()
+		-- 투하 직후 본인 면역
+		if victim.player.UserId == racer.player.UserId and (now - placedAt) < cfg.armDelay then
+			return
+		end
+		consumed = true
+		victim.car.PrimaryPart:SetAttribute("SpinEndTime", now + cfg.spinDuration)
+		Remotes.Event("ItemEffect"):FireAllClients({ kind = "banana", userId = victim.player.UserId })
+		banana:Destroy()
+	end)
+
+	task.delay(cfg.life, function()
+		if banana.Parent then
+			banana:Destroy()
+		end
+	end)
+end
+
+-- 로켓: 사용자 본인을 잠깐 엄청 빠르게 가속
+local function useRocket(racer: RacerState)
+	local car = racer.car
+	if not car or not car.PrimaryPart then
+		return
+	end
+	local cfg = GameConfig.Items.rocket
+	local now = workspace:GetServerTimeNow()
+	car.PrimaryPart:SetAttribute("RocketEndTime", now + cfg.duration)
+	Remotes.Event("ItemEffect"):FireAllClients({ kind = "rocket", userId = racer.player.UserId })
+end
+
+-- 가두는 물풍선 버블(시각효과): 피격 차량에 부착되어 일정 시간 후 제거
+local function spawnFreezeBubble(racer: RacerState, duration: number)
+	local car = racer.car
+	if not car or not car.PrimaryPart then
+		return
+	end
+	local seat = car.PrimaryPart
+	local bubble = Instance.new("Part")
+	bubble.Name = "FreezeBubble"
+	bubble.Shape = Enum.PartType.Ball
+	bubble.Anchored = false
+	bubble.CanCollide = false
+	bubble.Massless = true
+	bubble.Size = Vector3.new(15, 15, 15)
+	bubble.Color = GameConfig.Items.balloon.color
+	bubble.Material = Enum.Material.Glass
+	bubble.Transparency = 0.5
+	bubble.CFrame = seat.CFrame
+	bubble.Parent = itemParent()
+	local weld = Instance.new("WeldConstraint")
+	weld.Part0 = seat
+	weld.Part1 = bubble
+	weld.Parent = bubble
+	task.delay(duration, function()
+		if bubble.Parent then
+			bubble:Destroy()
+		end
+	end)
+end
+
+-- 전방 원뿔 안에서 사정거리 내 가장 가까운 다른 레이서 탐색
+local function findFreezeTarget(racer: RacerState): RacerState?
+	local car = racer.car
+	if not car or not car.PrimaryPart then
+		return nil
+	end
+	local cfg = GameConfig.Items.balloon
+	local origin = car.PrimaryPart.Position
+	local forward = car.PrimaryPart.CFrame.LookVector
+	local best: RacerState? = nil
+	local bestDist = math.huge
+	for _, other in pairs(racers) do
+		if other.player.UserId ~= racer.player.UserId and other.car and other.car.PrimaryPart and not other.finished then
+			local toOther = other.car.PrimaryPart.Position - origin
+			local dist = toOther.Magnitude
+			if dist > 1 and dist <= cfg.range then
+				if forward:Dot(toOther.Unit) >= cfg.coneDot and dist < bestDist then
+					bestDist = dist
+					best = other
+				end
+			end
+		end
+	end
+	return best
+end
+
+-- 물풍선: 앞쪽 가까운 상대를 3초간 가둠. 맞출 상대가 없으면 소모하지 않음
+local function useBalloon(racer: RacerState): boolean
+	local cfg = GameConfig.Items.balloon
+	local target = findFreezeTarget(racer)
+	if not target or not target.car or not target.car.PrimaryPart then
+		notify(racer.player, "앞에 맞출 상대가 없어요!")
+		return false
+	end
+	local now = workspace:GetServerTimeNow()
+	target.car.PrimaryPart:SetAttribute("FreezeEndTime", now + cfg.freezeDuration)
+	spawnFreezeBubble(target, cfg.freezeDuration)
+	Remotes.Event("ItemEffect"):FireAllClients({
+		kind = "balloon",
+		fromUserId = racer.player.UserId,
+		userId = target.player.UserId,
+	})
+	notify(target.player, "💧 물풍선에 맞았어요! 잠시 갇힘!")
+	return true
+end
+
+-- 보유 아이템 사용 요청 처리 (클라 RequestUseItem → Main.server에서 호출)
+function RaceManager.useItem(player: Player)
+	if state ~= "Racing" then
+		return
+	end
+	local racer = racers[player.UserId]
+	if not racer or not racer.item or not racer.car or not racer.car.PrimaryPart then
+		return
+	end
+	-- 갇혀 있는 동안에는 사용 불가
+	local now = workspace:GetServerTimeNow()
+	local frozenEnd = racer.car.PrimaryPart:GetAttribute("FreezeEndTime")
+	if typeof(frozenEnd) == "number" and now < frozenEnd then
+		return
+	end
+
+	local item = racer.item
+	local consumed = true
+	if item == "banana" then
+		dropBanana(racer)
+	elseif item == "rocket" then
+		useRocket(racer)
+	elseif item == "balloon" then
+		consumed = useBalloon(racer)
+	end
+
+	if consumed then
+		racer.item = nil
+		Remotes.Event("ItemUpdated"):FireClient(player, "none")
+	end
+end
+
+-- 부스트 패드 / 오일 슬릭 / 아이템 박스에 Touched 핸들러 연결
 function RaceManager.setupTrackItems(track: TrackGenerator.TrackInfo)
 	local lastTouch: { [string]: number } = {} -- "itemId:userId" -> 시각 (디바운스)
 
@@ -288,6 +566,19 @@ function RaceManager.setupTrackItems(track: TrackGenerator.TrackInfo)
 	end
 	for _, oil in ipairs(track.oilSlicks) do
 		bind(oil, "oil", GameConfig.Obstacles.slowDuration, "SlowEndTime")
+	end
+
+	-- 아이템 박스: 통과 시 랜덤 아이템 지급
+	for _, box in ipairs(track.itemBoxes) do
+		box.Touched:Connect(function(hit)
+			if state ~= "Racing" then
+				return
+			end
+			local racer = racerFromHit(hit)
+			if racer then
+				onItemBoxTouched(box, racer)
+			end
+		end)
 	end
 end
 

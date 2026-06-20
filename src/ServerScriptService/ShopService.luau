@@ -117,7 +117,26 @@ function ShopService.handleSaveCustomization(player: Player, payload: any)
 		neonColor = validColorIndexArray(payload.neonColor) and clampColorArray(payload.neonColor) or { 0, 0, 0 },
 		sticker = "none",
 		plate = "RACER",
+		name = "박서우차",
 	}
+
+	-- 차 이름 (유니코드 허용 / 제어문자 제거 / 최대 12자, 기본값 "박서우차")
+	if type(payload.name) == "string" then
+		local cleaned = string.gsub(payload.name, "%c", "")
+		cleaned = string.match(cleaned, "^%s*(.-)%s*$") or ""
+		local okLen, count = pcall(utf8.len, cleaned)
+		if okLen and type(count) == "number" then
+			if count > 12 then
+				local off = utf8.offset(cleaned, 13)
+				if off then
+					cleaned = string.sub(cleaned, 1, off - 1)
+				end
+			end
+			if #cleaned > 0 then
+				custom.name = cleaned
+			end
+		end
+	end
 
 	-- 스티커 id 검증
 	if type(payload.sticker) == "string" then

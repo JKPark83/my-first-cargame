@@ -45,6 +45,7 @@ export type TrackInfo = {
 	bounds: { minX: number, maxX: number, minZ: number, maxZ: number },
 	boostPads: { BasePart }, -- 부스트 패드
 	oilSlicks: { BasePart }, -- 오일 슬릭(감속)
+	itemBoxes: { BasePart }, -- 아이템 박스(통과 시 랜덤 아이템)
 }
 
 -- 시드 기반 의사난수 생성기 (재현 가능)
@@ -224,6 +225,40 @@ local function makeOilSlick(cf: CFrame, parent: Instance): BasePart
 	return oil
 end
 
+-- 아이템 박스 생성 (통과하면 랜덤 아이템 획득)
+local function makeItemBox(cf: CFrame, parent: Instance): BasePart
+	local size = GameConfig.Items.boxSize
+	local box = Instance.new("Part")
+	box.Name = "ItemBox"
+	box.Anchored = true
+	box.CanCollide = false
+	box.Material = Enum.Material.Neon
+	box.Color = GameConfig.Items.boxColor
+	box.Size = Vector3.new(size, size, size)
+	box.CFrame = cf * CFrame.new(0, size / 2 + 1.5, 0)
+	box.Transparency = 0.2
+	box:SetAttribute("Active", true) -- 획득 후 비활성화/재생성 토글
+	box.Parent = parent
+
+	-- 물음표 표시 (모든 방향에서 보이도록 BillboardGui 사용)
+	local bg = Instance.new("BillboardGui")
+	bg.Name = "Mark"
+	bg.Size = UDim2.fromOffset(60, 60)
+	bg.AlwaysOnTop = false
+	bg.Adornee = box
+	bg.Parent = box
+	local lbl = Instance.new("TextLabel")
+	lbl.Size = UDim2.fromScale(1, 1)
+	lbl.BackgroundTransparency = 1
+	lbl.Text = "?"
+	lbl.TextColor3 = Color3.fromRGB(255, 255, 255)
+	lbl.TextStrokeTransparency = 0.3
+	lbl.Font = Enum.Font.GothamBlack
+	lbl.TextScaled = true
+	lbl.Parent = bg
+	return box
+end
+
 -- 장식용 라바콘 생성 (시각적 장애물)
 local function makeCone(cf: CFrame, parent: Instance)
 	local cone = Instance.new("Part")
@@ -266,6 +301,58 @@ function TrackGenerator.build(index: number, parent: Instance?): TrackInfo
 		local a = path[i]
 		local b = path[(i % #path) + 1]
 		makeRoadSegment(a, b, model, i)
+	end
+
+	-- 커브 이음새(틈) 메우기
+	-- 직선 박스 세그먼트는 커브에서 끝면이 각을 이뤄 바깥 모서리에 삼각형 틈이 생긴다.
+	-- 각 꼭짓점에 진행 방향 평균(바이섹터)으로 정렬한 도로/레일 캡을 덧대 매끄럽게 잇는다.
+	-- 캡은 살짝 띄워 z-fighting을 피하고, 도로 캡은 CanCollide=false(주행 범프 방지)로 둔다.
+	do
+		local np = #path
+		for i = 1, np do
+			local prev = path[(i - 2) % np + 1]
+			local cur = path[i]
+			local nxt = path[i % np + 1]
+			local dIn = cur - prev
+			local dOut = nxt - cur
+			if dIn.Magnitude < 0.05 or dOut.Magnitude < 0.05 then
+				continue
+			end
+			local uIn, uOut = dIn.Unit, dOut.Unit
+			-- 거의 직선인 이음새는 캡이 불필요 → 건너뛰어 파트 수 절약
+			if uIn:Dot(uOut) > 0.99985 then
+				continue
+			end
+			local bis = uIn + uOut
+			if bis.Magnitude < 1e-3 then
+				continue
+			end
+			local look = CFrame.lookAt(cur, cur + bis.Unit)
+			local capLen = 4
+
+			-- 도로 바닥 캡 (양쪽 벽 아래로 살짝 파묻히게 폭을 키움, 0.04 띄워 z-fighting 방지)
+			local cap = Instance.new("Part")
+			cap.Anchored = true
+			cap.CanCollide = false
+			cap.Material = Enum.Material.Asphalt
+			cap.Color = ROAD_COLOR
+			cap.Size = Vector3.new(ROAD_WIDTH + 1.2, ROAD_THICKNESS, capLen)
+			cap.CFrame = look * CFrame.new(0, -ROAD_THICKNESS / 2 + 0.04, 0)
+			cap.TopSurface = Enum.SurfaceType.Smooth
+			cap.BottomSurface = Enum.SurfaceType.Smooth
+			cap.Parent = model
+
+			-- 레일 캡(좌 빨강 / 우 흰색) — 색 레일 라인을 끊김 없이 연결
+			for _, side in ipairs({ -1, 1 }) do
+				makeStripe(
+					look,
+					CFrame.new(side * (ROAD_WIDTH / 2), WALL_HEIGHT + RAIL_HEIGHT / 2 + 0.03, 0),
+					Vector3.new(1.7, RAIL_HEIGHT, capLen),
+					side == -1 and RAIL_LEFT or RAIL_RIGHT,
+					model
+				)
+			end
+		end
 	end
 
 	-- 체크포인트 생성 (경로 노드 위치 기반, 순서대로)
@@ -349,6 +436,16 @@ function TrackGenerator.build(index: number, parent: Instance?): TrackInfo
 		oilSlicks[i] = makeOilSlick(cf, itemFolder)
 	end
 
+	-- 아이템 박스: 도로 폭 방향으로 좌/중/우 번갈아 배치(주워 먹는 재미)
+	local itemBoxes: { BasePart } = {}
+	for i = 1, GameConfig.Items.boxesPerTrack do
+		local idx = startGap + math.floor(usable * (i - 0.5) / GameConfig.Items.boxesPerTrack) + 1
+		idx = ((idx + 2 - 1) % #path) + 1 -- 부스트/오일과 다른 위치로 오프셋
+		local lane = ((i % 3) - 1) -- -1, 0, 1 순환
+		local cf = pathCFrameAt(path, idx) * CFrame.new(lane * (ROAD_WIDTH / 4), 0, 0)
+		itemBoxes[i] = makeItemBox(cf, itemFolder)
+	end
+
 	-- 장식용 콘: 도로 가장자리에 배치
 	for i = 1, GameConfig.Obstacles.conesPerTrack do
 		local idx = math.floor(#path * (i - 0.5) / GameConfig.Obstacles.conesPerTrack) + 1
@@ -386,6 +483,7 @@ function TrackGenerator.build(index: number, parent: Instance?): TrackInfo
 		bounds = { minX = minX, maxX = maxX, minZ = minZ, maxZ = maxZ },
 		boostPads = boostPads,
 		oilSlicks = oilSlicks,
+		itemBoxes = itemBoxes,
 	}
 end
 

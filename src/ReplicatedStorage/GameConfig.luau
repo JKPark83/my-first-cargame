@@ -249,6 +249,7 @@ GameConfig.Race = {
 	laps = 2, -- 완주 랩 수
 	raceTimeLimit = 180, -- 경주 제한 시간 (초)
 	progressBroadcastInterval = 0.15, -- 실시간 순위/미니맵 갱신 주기 (초)
+	entryLoadTime = 1.4, -- 경주 진입 로딩 화면 최소 표시 시간(트랙 생성/순간이동 히치 마스킹, 초)
 }
 
 -- =====================================================================
@@ -256,9 +257,9 @@ GameConfig.Race = {
 -- =====================================================================
 GameConfig.Boost = {
 	padsPerTrack = 8, -- 트랙당 부스트 패드 수
-	speedMultiplier = 1.6, -- 부스트 시 속도 배수
-	accelMultiplier = 1.8, -- 부스트 시 가속 배수
-	duration = 2.0, -- 부스트 지속 시간 (초)
+	speedMultiplier = 2.0, -- 부스터 패드: 속도 2배
+	accelMultiplier = 2.0, -- 부스터 패드: 가속 2배
+	duration = 2.0, -- 부스터 지속 시간 (초)
 	padColor = Color3.fromRGB(80, 230, 255),
 }
 
@@ -271,6 +272,55 @@ GameConfig.Obstacles = {
 	slowDuration = 1.4, -- 감속 지속 시간 (초)
 	oilColor = Color3.fromRGB(35, 30, 45),
 	conesPerTrack = 10, -- 장식용 라바콘 수 (시각적 장애물)
+}
+
+-- =====================================================================
+-- 아이템 시스템 (마리오카트식)
+--   트랙의 "아이템 박스"를 통과하면 랜덤 아이템을 얻고, 사용 키로 발동한다.
+--   효과는 부스트와 동일하게 차량 시트의 어트리뷰트(종료 시각)로 전달된다.
+-- =====================================================================
+GameConfig.Items = {
+	boxesPerTrack = 12, -- 트랙당 아이템 박스 수
+	boxRespawnTime = 5, -- 획득 후 박스 재생성 시간 (초)
+	boxColor = Color3.fromRGB(255, 225, 70),
+	boxSize = 5, -- 아이템 박스 한 변 길이
+
+	-- 획득 풀 (가중치 랜덤). id는 아래 정의 키와 일치해야 함
+	pool = {
+		{ id = "banana", weight = 3 },
+		{ id = "rocket", weight = 2 },
+		{ id = "balloon", weight = 2 },
+	},
+
+	-- 바나나: 뒤에 떨어뜨려 두고, 밟은 차량을 회전(미끄러짐)시킴
+	banana = {
+		emoji = "🍌",
+		displayName = "바나나",
+		spinDuration = 1.6, -- 밟으면 빙글빙글 도는 시간 (초)
+		dropBackOffset = 9, -- 차 뒤로 떨어뜨리는 거리 (스터드)
+		armDelay = 0.5, -- 투하 직후 본인 면역 시간 (초)
+		life = 30, -- 자동 소멸 시간 (초)
+		color = Color3.fromRGB(240, 220, 40),
+	},
+
+	-- 로켓: 사용 시 잠깐 엄청 빠르게 가속
+	rocket = {
+		emoji = "🚀",
+		displayName = "로켓",
+		speedMultiplier = 3.0, -- 속도 배수 (엄청 빠름)
+		accelMultiplier = 3.0,
+		duration = 2.2, -- 지속 시간 (초)
+	},
+
+	-- 물풍선: 앞쪽 가까운 상대에게 던져 3초간 가둠
+	balloon = {
+		emoji = "💧",
+		displayName = "물풍선",
+		freezeDuration = 3.0, -- 맞으면 갇히는 시간 (초)
+		range = 140, -- 사정거리 (스터드)
+		coneDot = 0.5, -- 전방 원뿔 정렬도(0~1, 클수록 정면만)
+		color = Color3.fromRGB(90, 190, 255),
+	},
 }
 
 -- =====================================================================
@@ -299,6 +349,19 @@ GameConfig.Audio = {
 	boostPitchBonus = 0.25, -- 부스트 시 추가 피치
 	rollOffMinDistance = 12, -- 이 거리 안에서는 최대 볼륨
 	rollOffMaxDistance = 240, -- 이 거리 밖에서는 안 들림
+}
+
+-- =====================================================================
+-- 로비 / 장식 (LoungeBuilder)
+-- =====================================================================
+-- 모든 좌표는 LOUNGE_ORIGIN(0,0,3000) 기준 상대 오프셋입니다.
+-- 장식이 많아 Studio 반복 테스트가 무거우면 showDecorations=false로 끄세요.
+GameConfig.Lobby = {
+	showDecorations = true, -- 장식 일괄 on/off (false면 기존 최소 구성으로 경량화)
+	carSelectPadOffset = Vector3.new(-35, 1.5, 35), -- 차량 선택 패드 위치
+	queuePadOffset = Vector3.new(35, 1.5, 35), -- 경주 참가 패드 위치 (기존 (40,1.5,0) 대체)
+	grandstandSteps = 4, -- 관중석 계단 수 (벽 침범 방지: far edge < 78 유지)
+	showcaseCarId = "turbo_gt", -- 차량 선택 패드 위에 띄울 전시 차량 id
 }
 
 return GameConfig
