@@ -21,6 +21,56 @@ local player = Players.LocalPlayer
 local activeSeat: VehicleSeat? = nil
 local currentSpeed = 0 -- 현재 전진 속도(음수 = 후진)
 
+-- 엔진 사운드: 속도에 비례해 피치/볼륨을 조절해 RPM 느낌을 낸다
+local function updateEngineSound(seat: VehicleSeat, speedRatio: number, boosting: boolean)
+	local engine = seat:FindFirstChild("Engine")
+	if not engine or not engine:IsA("Sound") then
+		return
+	end
+	local cfg = GameConfig.Audio
+	local pitch = cfg.idlePlaybackSpeed + (cfg.maxPlaybackSpeed - cfg.idlePlaybackSpeed) * speedRatio
+	if boosting then
+		pitch += cfg.boostPitchBonus
+	end
+	local volume = cfg.idleVolume + (cfg.maxVolume - cfg.idleVolume) * speedRatio
+	-- 부드럽게 추종
+	engine.PlaybackSpeed += (pitch - engine.PlaybackSpeed) * 0.2
+	engine.Volume += (volume - engine.Volume) * 0.2
+end
+
+-- 엔진 사운드 자동 선택: 후보 id를 순회하며 "실제로 로드되는 첫 id"를 고른다.
+-- 일부 에셋이 모더레이션/삭제로 죽어도 다른 후보로 소리가 나게 한다.
+-- (오디오 로드는 클라이언트에서 일어나므로 여기서 검증/교체한다.)
+local function ensureEngineSound(seat: VehicleSeat)
+	local engine = seat:FindFirstChild("Engine")
+	if not engine or not engine:IsA("Sound") then
+		return
+	end
+	local sound = engine :: Sound
+	local ids = GameConfig.Audio.engineSoundIds
+	task.spawn(function()
+		for _, id in ipairs(ids) do
+			-- 차량이 사라졌으면 중단
+			if not sound.Parent then
+				return
+			end
+			sound.SoundId = "rbxassetid://" .. tostring(id)
+			sound.Looped = true
+			sound.Playing = true
+			local t0 = os.clock()
+			while not sound.IsLoaded and os.clock() - t0 < 2 do
+				RunService.Heartbeat:Wait()
+				if not sound.Parent then
+					return
+				end
+			end
+			if sound.IsLoaded then
+				break -- 동작하는 id를 찾음
+			end
+		end
+	end)
+end
+
 -- 현재 탑승 중인 차량 시트를 찾음
 local function findCarSeat(): VehicleSeat?
 	local character = player.Character
@@ -48,6 +98,9 @@ RunService.Heartbeat:Connect(function(dt: number)
 	if seat ~= activeSeat then
 		activeSeat = seat
 		currentSpeed = 0
+		if seat then
+			ensureEngineSound(seat) -- 새 차량 탑승 시 동작하는 엔진 사운드 선택
+		end
 	end
 	if not seat then
 		return
@@ -55,6 +108,7 @@ RunService.Heartbeat:Connect(function(dt: number)
 	-- 출발 카운트다운 중에는 차량이 고정(Anchored)됨
 	if seat.Anchored then
 		currentSpeed = 0
+		updateEngineSound(seat, 0, false)
 		return
 	end
 
@@ -116,4 +170,7 @@ RunService.Heartbeat:Connect(function(dt: number)
 	local turnRate = handling * 2.6 * (0.25 + 0.75 * speedFactor)
 	local direction = currentSpeed >= 0 and 1 or -1
 	seat.AssemblyAngularVelocity = Vector3.new(0, -steer * turnRate * direction, 0)
+
+	-- 엔진 사운드 갱신 (속도 비례 피치/볼륨)
+	updateEngineSound(seat, speedFactor, boosting)
 end)

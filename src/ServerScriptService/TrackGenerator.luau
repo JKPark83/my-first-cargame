@@ -18,10 +18,20 @@ local TrackGenerator = {}
 
 local ROAD_WIDTH = 48
 local ROAD_THICKNESS = 2
-local WALL_HEIGHT = 8
+local WALL_HEIGHT = 5 -- 가드레일(충돌 벽) 높이
+local RAIL_HEIGHT = 0.6 -- 벽 위 색 레일 두께
+local SAMPLES_PER_SEGMENT = 14 -- 노드 사이 보간 샘플 수 (높을수록 매끄러움)
 local CHECKPOINT_EVERY = 1 -- 모든 경로 노드를 체크포인트로 사용
 local NODE_COUNT = 16 -- 루프를 구성하는 제어점 수
 local BASE_RADIUS = 320 -- 트랙 기본 반경
+
+-- 도로/마킹/벽 색
+local ROAD_COLOR = Color3.fromRGB(48, 49, 56)
+local WALL_COLOR = Color3.fromRGB(70, 73, 84)
+local RAIL_LEFT = Color3.fromRGB(225, 80, 80) -- 왼쪽 레일(빨강 계열)
+local RAIL_RIGHT = Color3.fromRGB(235, 235, 240) -- 오른쪽 레일(흰색)
+local LANE_COLOR = Color3.fromRGB(240, 215, 90) -- 중앙 차선(노랑)
+local EDGE_COLOR = Color3.fromRGB(225, 228, 235) -- 가장자리 라인(흰색)
 
 export type TrackInfo = {
 	index: number,
@@ -47,12 +57,12 @@ local function generateNodes(rng: Random): { Vector3 }
 	local nodes: { Vector3 } = {}
 	for i = 1, NODE_COUNT do
 		local angle = (i - 1) / NODE_COUNT * math.pi * 2
-		-- 반경에 노이즈를 주어 트랙마다 모양이 달라지게 함
-		local radiusJitter = rng:NextNumber(0.65, 1.35)
+		-- 반경에 완만한 노이즈를 주어 트랙마다 모양이 달라지되, 너무 들쭉날쭉하지 않게 함
+		local radiusJitter = rng:NextNumber(0.82, 1.16)
 		local radius = BASE_RADIUS * radiusJitter
-		-- 약간의 고저차(아케이드라 완만하게)
+		-- 살짝 타원으로 변형(자연스러운 곡선)
 		local x = math.cos(angle) * radius
-		local z = math.sin(angle) * radius * rng:NextNumber(0.8, 1.2)
+		local z = math.sin(angle) * radius * rng:NextNumber(0.92, 1.08)
 		nodes[i] = Vector3.new(x, 0, z)
 	end
 	return nodes
@@ -88,7 +98,21 @@ local function buildPath(nodes: { Vector3 }, samplesPerSegment: number): { Vecto
 	return path
 end
 
-local function makeRoadSegment(a: Vector3, b: Vector3, parent: Instance): ()
+-- 얇은 시각용 파트(충돌 없음) — 도로 마킹/레일
+local function makeStripe(look: CFrame, offset: CFrame, size: Vector3, color: Color3, parent: Instance)
+	local p = Instance.new("Part")
+	p.Anchored = true
+	p.CanCollide = false
+	p.Material = Enum.Material.SmoothPlastic
+	p.Color = color
+	p.Size = size
+	p.CFrame = look * offset
+	p.TopSurface = Enum.SurfaceType.Smooth
+	p.BottomSurface = Enum.SurfaceType.Smooth
+	p.Parent = parent
+end
+
+local function makeRoadSegment(a: Vector3, b: Vector3, parent: Instance, index: number): ()
 	local mid = (a + b) / 2
 	local dir = b - a
 	local length = dir.Magnitude
@@ -96,27 +120,54 @@ local function makeRoadSegment(a: Vector3, b: Vector3, parent: Instance): ()
 		return
 	end
 	local look = CFrame.lookAt(mid, b)
+	local segLen = length + 1 -- 세그먼트끼리 살짝 겹쳐 틈 제거
 
+	-- 도로 바닥
 	local road = Instance.new("Part")
 	road.Anchored = true
 	road.Material = Enum.Material.Asphalt
-	road.Color = Color3.fromRGB(55, 55, 60)
-	road.Size = Vector3.new(ROAD_WIDTH, ROAD_THICKNESS, length + 1)
+	road.Color = ROAD_COLOR
+	road.Size = Vector3.new(ROAD_WIDTH, ROAD_THICKNESS, segLen)
 	road.CFrame = look * CFrame.new(0, -ROAD_THICKNESS / 2, 0)
 	road.TopSurface = Enum.SurfaceType.Smooth
 	road.BottomSurface = Enum.SurfaceType.Smooth
 	road.Parent = parent
 
-	-- 양쪽 벽(가드레일) — 코스 이탈 방지
+	-- 양쪽 솔리드 가드레일(충돌) + 색 레일 캡
 	for _, side in ipairs({ -1, 1 }) do
 		local wall = Instance.new("Part")
 		wall.Anchored = true
-		wall.Material = Enum.Material.Neon
-		wall.Color = side == -1 and Color3.fromRGB(230, 80, 80) or Color3.fromRGB(80, 160, 230)
-		wall.Size = Vector3.new(1.5, WALL_HEIGHT, length + 1)
+		wall.Material = Enum.Material.SmoothPlastic
+		wall.Color = WALL_COLOR
+		wall.Size = Vector3.new(1.4, WALL_HEIGHT, segLen)
 		wall.CFrame = look * CFrame.new(side * (ROAD_WIDTH / 2), WALL_HEIGHT / 2, 0)
-		wall.Transparency = 0.35
+		wall.TopSurface = Enum.SurfaceType.Smooth
+		wall.BottomSurface = Enum.SurfaceType.Smooth
 		wall.Parent = parent
+		-- 레일 캡(색): 왼쪽/오른쪽 다른 색으로 방향감
+		makeStripe(
+			look,
+			CFrame.new(side * (ROAD_WIDTH / 2), WALL_HEIGHT + RAIL_HEIGHT / 2, 0),
+			Vector3.new(1.7, RAIL_HEIGHT, segLen),
+			side == -1 and RAIL_LEFT or RAIL_RIGHT,
+			parent
+		)
+	end
+
+	-- 가장자리 흰색 라인 (도로면 살짝 위)
+	for _, side in ipairs({ -1, 1 }) do
+		makeStripe(
+			look,
+			CFrame.new(side * (ROAD_WIDTH / 2 - 2), 0.06, 0),
+			Vector3.new(0.7, 0.12, segLen),
+			EDGE_COLOR,
+			parent
+		)
+	end
+
+	-- 중앙 차선(노랑 점선) — 한 칸 걸러 하나
+	if index % 2 == 0 then
+		makeStripe(look, CFrame.new(0, 0.06, 0), Vector3.new(0.8, 0.12, segLen * 0.6), LANE_COLOR, parent)
 	end
 end
 
@@ -208,13 +259,13 @@ function TrackGenerator.build(index: number, parent: Instance?): TrackInfo
 	model.Name = ("Track_%d"):format(index)
 
 	local nodes = generateNodes(rng)
-	local path = buildPath(nodes, 8)
+	local path = buildPath(nodes, SAMPLES_PER_SEGMENT)
 
 	-- 도로 생성
 	for i = 1, #path do
 		local a = path[i]
 		local b = path[(i % #path) + 1]
-		makeRoadSegment(a, b, model)
+		makeRoadSegment(a, b, model, i)
 	end
 
 	-- 체크포인트 생성 (경로 노드 위치 기반, 순서대로)

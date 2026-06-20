@@ -1015,22 +1015,30 @@ Remotes.Event("QueueStateChanged").OnClientEvent:Connect(function(info)
 	end
 end)
 
--- 경주 상태 변화: 경주 시작 시 대기열 상태/패널 정리
+-- 라운지 버튼(차고/경주참가/순위표) 일괄 표시 토글
+local function setLobbyButtonsVisible(visible: boolean)
+	garageBtn.Visible = visible
+	queueBtn.Visible = visible
+	leaderboardBtn.Visible = visible
+end
+
+-- 경주 상태 변화: 경주 시작 시 대기열 상태/패널/버튼 정리
 Remotes.Event("RaceStateChanged").OnClientEvent:Connect(function(info)
 	if info.state == "Racing" then
 		inQueue = false
-		queueBtn.Text = "🏁 경주 중"
-		queueBtn.BackgroundColor3 = Color3.fromRGB(120, 120, 130)
-		queueBtn.AutoButtonColor = false
+		-- 경주 중에는 라운지 버튼과 모든 패널을 숨긴다
+		setLobbyButtonsVisible(false)
 		garageFrame.Visible = false
 		customFrame.Visible = false
 		customizeOpenBtn.Visible = false
 		lbFrame.Visible = false
+		queueStatus.Visible = false
 	else
+		-- 라운지 복귀: 버튼 복원 + HUD 정리
+		setLobbyButtonsVisible(true)
 		queueBtn.AutoButtonColor = true
 		setQueueButton(false)
 		queueStatus.Visible = false
-		-- 경주 종료: 미니맵/순위 HUD 숨김 및 정리
 		minimap.Visible = false
 		rankHud.Visible = false
 		statusIndicator.Visible = false
