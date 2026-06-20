@@ -17,10 +17,52 @@
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 local GameConfig = require(ReplicatedStorage.GameConfig)
 local DataManager = require(script.Parent.DataManager)
 
 local CarSpawner = {}
+
+-- =====================================================================
+-- 운전자 착석 + 네트워크 소유권 "확실히" 부여 (검증 + 재시도)
+-- =====================================================================
+-- ⚠️ "출발 직후 차가 안 움직이고, 내렸다 다시 타야 가던" 버그의 근본 해결.
+--    원인: 착석/소유권 설정을 단발(pcall) 호출로만 했더니, 스폰 직후 프레임 경합·
+--    스트리밍 타이밍에서 조용히 실패해도 그냥 넘어가 소유권이 서버에 남았다.
+--    그러면 클라이언트(CarController)가 매 프레임 쓰는 속도가 무시되어 차가 안 움직였고,
+--    재탑승하면 엔진이 착석 시 소유권을 자동으로 운전자에게 줘서 그제서야 풀렸다.
+--    → 여기서 "착석됨 + 소유권=운전자"가 될 때까지 검증하며 재시도해 확실히 굳힌다.
+function CarSpawner.seatDriver(seat: VehicleSeat, humanoid: Humanoid, player: Player): boolean
+	for _ = 1, 14 do
+		-- 차/캐릭터가 사라졌으면 중단
+		if not seat.Parent or not humanoid.Parent or humanoid.Health <= 0 then
+			return false
+		end
+		-- 아직 이 시트에 안 앉아 있으면 앉힌다(이미 앉아 있으면 건드리지 않음 → 재탑승 히치 방지)
+		if seat.Occupant ~= humanoid then
+			pcall(function()
+				seat:Sit(humanoid)
+			end)
+		end
+		RunService.Heartbeat:Wait() -- 착석/물리 반영에 한 프레임 양보
+		-- 소유권을 운전자에게(앵커를 안 쓰므로 정상 동작). 실패해도 다음 루프에서 재시도.
+		local setOk = pcall(function()
+			seat:SetNetworkOwner(player)
+		end)
+		if setOk and seat.Occupant == humanoid then
+			-- 검증: 실제로 소유권이 운전자에게 박혔는가
+			local owner: Player? = nil
+			local getOk = pcall(function()
+				owner = seat:GetNetworkOwner()
+			end)
+			if getOk and owner == player then
+				return true -- 성공: 착석 + 소유권 확정
+			end
+		end
+		task.wait(0.07)
+	end
+	return false
+end
 
 -- 차체 기본 치수 (시트 = 하부 바디)
 local BODY_W = 6.6
@@ -513,21 +555,21 @@ function CarSpawner.spawnFor(player: Player, spawnCFrame: CFrame, parent: Instan
 	model:PivotTo(spawnCFrame)
 	-- 이름표를 운전자(플레이어) 이름으로 표시 → 누가 누구인지 식별
 	CarSpawner.setNameTag(model, player.DisplayName)
+
+	local seat = model.PrimaryPart :: VehicleSeat
+	-- 태어날 때부터 동결 상태로 둔다(클라가 RaceFrozen을 보고 제자리 유지) → 출발 카운트다운
+	-- 시작 전에 차가 굴러가거나 미끄러지지 않는다. GO 때 RaceManager가 false로 푼다.
+	seat:SetAttribute("RaceFrozen", true)
 	model.Parent = parent or workspace
 
-	-- 캐릭터를 시트에 앉히고, 그 직후 네트워크 소유권을 운전자에게 넘긴다.
-	-- (착석 → 소유권 순서를 한 블록에서 보장해야 클라이언트 조작이 처음부터 반영된다.
-	--  동결도 앵커가 아닌 RaceFrozen 속성으로 하므로 이 소유권은 카운트다운 내내 유지된다.)
+	-- 캐릭터를 시트에 앉히고 네트워크 소유권을 운전자에게 "확실히" 부여한다(검증 + 재시도).
+	-- 단발 호출이 아니라 seatDriver로 끝까지 확인해야 출발 직후 멈춤 버그가 안 난다.
 	local character = player.Character
-	local seat = model.PrimaryPart :: VehicleSeat
 	if character then
 		local humanoid = character:FindFirstChildOfClass("Humanoid")
 		if humanoid then
-			task.defer(function()
-				seat:Sit(humanoid)
-				pcall(function()
-					seat:SetNetworkOwner(player)
-				end)
+			task.spawn(function()
+				CarSpawner.seatDriver(seat, humanoid, player)
 			end)
 		end
 	end

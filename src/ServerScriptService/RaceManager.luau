@@ -433,21 +433,27 @@ function RaceManager.freezeCars(frozen: boolean)
 			continue
 		end
 		local car = racer.car
-		if car and car.PrimaryPart then
-			local seat = car.PrimaryPart
-			-- ⚠️ 출발 직후 "내렸다 다시 타야 움직이던" 버그의 근본 수정:
-			-- 예전엔 seat.Anchored=true 로 동결했는데, 앵커된 파트는 네트워크 소유권을
-			-- 가질 수 없어 운전자에게 줬던 소유권이 박탈되고, 앵커 해제 후에도 서버가 계속
-			-- 소유권을 쥐어 클라이언트 조작이 반영되지 않았다(재탑승해야 소유권 자동 재부여).
-			-- → 앵커 대신 RaceFrozen 속성으로 동결한다. 소유권은 운전자에게 그대로 유지되고,
-			--   클라이언트(CarController)가 속성을 보고 제자리를 지키다 GO 즉시 출발한다.
-			seat:SetAttribute("RaceFrozen", frozen)
-			-- 소유권을 운전자에게 확실히(앵커를 안 쓰므로 이 호출이 성공한다).
-			if racer.player then
-				pcall(function()
-					seat:SetNetworkOwner(racer.player)
-				end)
+		if not (car and car.PrimaryPart) then
+			continue
+		end
+		local seat = car.PrimaryPart :: VehicleSeat
+		-- ⚠️ "출발 직후 안 움직이고, 내렸다 다시 타야 가던" 버그의 근본 수정:
+		-- 앵커로 동결하면 네트워크 소유권이 박탈된다 → 앵커 대신 RaceFrozen 속성으로 동결.
+		-- 더 중요한 건 GO(해제) 직전에 착석 + 소유권을 "검증하며 재확립"하는 것:
+		-- 스폰 때 소유권 설정이 프레임 경합으로 실패했어도 여기서 확실히 되돌린다.
+		if frozen then
+			-- 동결: 속성만 켠다. (소유권은 spawnFor의 seatDriver가 확립)
+			seat:SetAttribute("RaceFrozen", true)
+		else
+			-- GO: 동결 해제 전에 운전자 착석 + 소유권을 확실히 재확인 → 그 다음 풀어야
+			--      클라이언트가 그 즉시 방향키로 출발(소유권 없으면 클라의 속도 쓰기가 무시됨).
+			local player = racer.player
+			local char = player and player.Character
+			local humanoid = char and char:FindFirstChildOfClass("Humanoid")
+			if player and humanoid then
+				CarSpawner.seatDriver(seat, humanoid, player)
 			end
+			seat:SetAttribute("RaceFrozen", false)
 		end
 	end
 end
