@@ -66,6 +66,65 @@ local wheelSpin = 0 -- 누적 굴림 회전각(rad)
 local wheelRadius = 1.65
 local MAX_STEER = math.rad(28) -- 앞바퀴 최대 조향각
 
+-- =====================================================================
+-- 드리프트 / 니트로 / 로켓 스타트 상태
+-- =====================================================================
+-- Shift(또는 모바일 DRIFT 버튼)로 핸드브레이크를 잡고 코너를 돌면 드리프트 →
+-- 니트로 게이지가 차고, 떼면 충전량에 비례한 부스트(NitroEndTime 속성)가 발사된다.
+-- 시각효과(연기/스키드/게이지 UI)는 CarEffectsController가 시트 속성을 읽어 표현한다.
+local DRIFT_ACTION = "RaceDrift" -- 핸드브레이크(드리프트) 입력 액션
+local handbrakeHeld = false -- Shift/모바일 DRIFT 버튼 눌림 상태
+local drifting = false -- 현재 드리프트 중인가
+local nitroCharge = 0 -- 니트로 게이지(0~1)
+-- 실제 진행 방향(접지 모델). 평소엔 차머리를 빠르게 추종(즉각 주행),
+-- 드리프트 중엔 느리게 추종 → 바깥으로 미끄러지는 느낌을 만든다.
+local moveDir = Vector3.new(0, 0, -1)
+local wasFrozen = false -- 직전 프레임에 출발 동결 상태였는가(GO 전환 감지용)
+local throttlePressStart: number? = nil -- 카운트다운 중 가속을 시작한 시각(로켓 스타트 판정)
+local lastCollisionPos: Vector3? = nil -- 충돌 감지용 직전 위치
+local lastCollisionAt = 0 -- 충돌 디바운스용 시각(os.clock)
+
+-- 시트 머리 방향을 평면(수평) 단위벡터로
+local function flatLook(seat: VehicleSeat): Vector3
+	local fwd = seat.CFrame.LookVector
+	local h = Vector3.new(fwd.X, 0, fwd.Z)
+	if h.Magnitude > 0 then
+		return h.Unit
+	end
+	return Vector3.new(0, 0, -1)
+end
+
+-- 드리프트 상태 초기화(빙글/얼음 등 특수 상태나 하차 시)
+local function resetDrift(seat: VehicleSeat?)
+	drifting = false
+	nitroCharge = 0
+	if seat then
+		seat:SetAttribute("Drifting", false)
+		seat:SetAttribute("NitroCharge", 0)
+	end
+end
+
+-- 핸드브레이크(Shift) 입력 바인딩. 3번째 인자 true → 모바일 터치 버튼 자동 생성.
+local function bindDrift()
+	handbrakeHeld = false
+	ContextActionService:BindAction(DRIFT_ACTION, function(_, state)
+		if state == Enum.UserInputState.Begin then
+			handbrakeHeld = true
+		elseif state == Enum.UserInputState.End or state == Enum.UserInputState.Cancel then
+			handbrakeHeld = false
+		end
+		return Enum.ContextActionResult.Pass
+	end, true, Enum.KeyCode.LeftShift, Enum.KeyCode.RightShift)
+	ContextActionService:SetTitle(DRIFT_ACTION, "DRIFT")
+end
+
+local function unbindDrift()
+	ContextActionService:UnbindAction(DRIFT_ACTION)
+	handbrakeHeld = false
+	drifting = false
+	nitroCharge = 0
+end
+
 -- 엔진 사운드: 속도에 비례해 피치/볼륨을 조절해 RPM 느낌을 낸다
 local function updateEngineSound(seat: VehicleSeat, speedRatio: number, boosting: boolean)
 	local engine = seat:FindFirstChild("Engine")
@@ -192,6 +251,13 @@ RunService.Heartbeat:Connect(function(dt: number)
 		if seat then
 			ensureEngineSound(seat) -- 새 차량 탑승 시 동작하는 엔진 사운드 선택
 			cacheWheels(seat) -- 바퀴 Motor6D 캐시
+			-- 드리프트/니트로 상태 초기화
+			moveDir = flatLook(seat)
+			wasFrozen = false
+			throttlePressStart = nil
+			lastCollisionPos = nil
+			resetDrift(seat)
+			bindDrift() -- 핸드브레이크(Shift/모바일 버튼) 입력 활성화
 			-- 탑승 즉시 점프 잠금(점프로 차에서 내려지는 것 방지)
 			local character = player.Character
 			local humanoid = character and character:FindFirstChildOfClass("Humanoid")
@@ -200,6 +266,7 @@ RunService.Heartbeat:Connect(function(dt: number)
 			end
 		else
 			restoreJump() -- 차에서 내리면(라운지 복귀 등) 점프 복구
+			unbindDrift() -- 핸드브레이크 입력 해제
 		end
 	end
 	if not seat then
@@ -222,6 +289,18 @@ RunService.Heartbeat:Connect(function(dt: number)
 			seat.AssemblyLinearVelocity = Vector3.new(0, vy, 0)
 			seat.AssemblyAngularVelocity = Vector3.zero
 		end
+		-- 로켓 스타트: 카운트다운 중 "가속을 시작한 시각"을 기록(GO 때 타이밍 판정).
+		-- 카운트다운 내내 밟고 있으면 throttlePressStart가 오래전 값이라 퍼펙트 윈도우를 벗어난다(부정출발 방지).
+		if seat.ThrottleFloat > 0.1 then
+			if throttlePressStart == nil then
+				throttlePressStart = os.clock()
+			end
+		else
+			throttlePressStart = nil -- 뗐다 다시 밟으면 타이밍 갱신
+		end
+		wasFrozen = true
+		moveDir = flatLook(seat) -- 동결 중엔 진행방향을 차머리에 고정(출발 시 깔끔)
+		resetDrift(seat)
 		updateEngineSound(seat, 0, false)
 		return
 	end
@@ -245,6 +324,8 @@ RunService.Heartbeat:Connect(function(dt: number)
 		seat.AssemblyLinearVelocity = Vector3.new(0, vy, 0)
 		seat.AssemblyAngularVelocity = Vector3.zero
 		updateWheels(0, dt)
+		resetDrift(seat)
+		moveDir = flatLook(seat)
 		updateEngineSound(seat, 0, false)
 		return
 	end
@@ -261,21 +342,47 @@ RunService.Heartbeat:Connect(function(dt: number)
 		seat.AssemblyLinearVelocity = Vector3.new(horizontal.X * currentSpeed, vy, horizontal.Z * currentSpeed)
 		seat.AssemblyAngularVelocity = Vector3.new(0, 9, 0) -- 강하게 회전(스핀아웃)
 		updateWheels(1, dt)
+		resetDrift(seat)
+		moveDir = flatLook(seat)
 		updateEngineSound(seat, 0.2, false)
 		return
 	end
 
-	-- 부스트(패드) / 로켓(아이템) / 감속(오일) 적용
+	-- GO 순간 감지(동결 해제로 막 빠져나온 프레임) → 로켓 스타트(퍼펙트 스타트) 판정
+	if wasFrozen then
+		wasFrozen = false
+		local rcfg = GameConfig.RocketStart
+		if
+			rcfg.enabled
+			and seat.ThrottleFloat > 0.1
+			and throttlePressStart ~= nil
+			and (os.clock() - throttlePressStart) <= rcfg.window
+		then
+			-- 퍼펙트! 기존 부스트 파이프라인(NitroEndTime)으로 출발 부스트 + 연출 신호
+			seat:SetAttribute("NitroEndTime", now + rcfg.boostDuration)
+			seat:SetAttribute("PerfectStart", os.clock()) -- 이펙트 컨트롤러 토스트용 신호
+		end
+		throttlePressStart = nil
+		moveDir = flatLook(seat)
+	end
+
+	-- 부스트(패드) / 로켓(아이템) / 니트로(드리프트·로켓스타트) / 감속(오일) 적용
 	local boostingPad = boostEnd ~= nil and now < boostEnd
 	local rocketing = rocketEnd ~= nil and now < rocketEnd
 	local slowed = slowEnd ~= nil and now < slowEnd
-	local boosting = boostingPad or rocketing -- 엔진 사운드 가속 연출용
+	local nitroEnd = seat:GetAttribute("NitroEndTime") :: number?
+	local nitroing = nitroEnd ~= nil and now < nitroEnd
+	local boosting = boostingPad or rocketing or nitroing -- 엔진 굉음/속도감 연출 트리거
 	if rocketing then
 		topSpeed *= GameConfig.Items.rocket.speedMultiplier
 		accel *= GameConfig.Items.rocket.accelMultiplier
 	elseif boostingPad then
 		topSpeed *= GameConfig.Boost.speedMultiplier
 		accel *= GameConfig.Boost.accelMultiplier
+	end
+	if nitroing then
+		topSpeed *= GameConfig.Drift.speedMultiplier
+		accel *= GameConfig.Drift.accelMultiplier
 	end
 	if slowed then
 		topSpeed *= GameConfig.Obstacles.slowFactor
@@ -305,22 +412,77 @@ RunService.Heartbeat:Connect(function(dt: number)
 		currentSpeed = 0
 	end
 
-	-- 전진 방향으로 수평 속도 적용 (수직 성분은 중력에 맡김)
-	local cf = seat.CFrame
-	local forward = cf.LookVector
-	local horizontal = Vector3.new(forward.X, 0, forward.Z)
-	if horizontal.Magnitude > 0 then
-		horizontal = horizontal.Unit
+	-- 전진 방향(차머리)
+	local heading = flatLook(seat)
+
+	-- 드리프트 판정: 핸드브레이크 + 충분한 속도 + 충분한 조향
+	local dcfg = GameConfig.Drift
+	local canDrift = dcfg.enabled
+		and handbrakeHeld
+		and currentSpeed > dcfg.minSpeed
+		and math.abs(steer) > dcfg.steerThreshold
+	if canDrift then
+		drifting = true
+		-- 게이지 충전(핸들을 더 꺾을수록 빨리 참)
+		nitroCharge = math.min(1, nitroCharge + dt * dcfg.chargeRate * (0.5 + 0.5 * math.abs(steer)))
+	elseif drifting then
+		-- 드리프트 종료 → 충전량에 비례한 미니터보 발사
+		drifting = false
+		if nitroCharge >= dcfg.minChargeToFire then
+			local dur = lerp(dcfg.minBoost, dcfg.maxBoost, math.clamp(nitroCharge, 0, 1))
+			seat:SetAttribute("NitroEndTime", now + dur)
+		end
+		nitroCharge = 0
 	end
+	seat:SetAttribute("Drifting", drifting)
+	seat:SetAttribute("NitroCharge", nitroCharge)
+
+	-- 접지 모델:
+	--  • 평소  : moveDir = heading (진행방향=차머리) → 일반 주행과 100% 동일(조작감 유지)
+	--  • 드리프트: moveDir가 heading을 "느리게" 추종 → 차는 안쪽을 보는데 바깥으로 미끄러짐
+	if drifting then
+		moveDir = moveDir:Lerp(heading, math.clamp(dt * dcfg.driftGrip, 0, 1))
+		if moveDir.Magnitude > 0 then
+			moveDir = moveDir.Unit
+		else
+			moveDir = heading
+		end
+	else
+		moveDir = heading
+	end
+
 	local vy = seat.AssemblyLinearVelocity.Y
-	local desired = horizontal * currentSpeed
+	local desired = moveDir * currentSpeed
 	seat.AssemblyLinearVelocity = Vector3.new(desired.X, vy, desired.Z)
 
-	-- 속도에 비례한 회전 (정지 시 회전 약함)
+	-- 속도에 비례한 회전 (정지 시 회전 약함). 드리프트 중엔 더 날카롭게.
 	local speedFactor = math.clamp(math.abs(currentSpeed) / topSpeed, 0, 1)
 	local turnRate = handling * 2.6 * (0.25 + 0.75 * speedFactor)
+	if drifting then
+		turnRate *= dcfg.turnBoost
+	end
 	local direction = currentSpeed >= 0 and 1 or -1
 	seat.AssemblyAngularVelocity = Vector3.new(0, -steer * turnRate * direction, 0)
+
+	-- 충돌 감지: 빠르게 가려는데 실제 이동이 막히면 벽/차 충돌로 간주 → 불꽃 신호 + 튕김 감속
+	local fxcfg = GameConfig.CarFX
+	if fxcfg.enabled and fxcfg.sparksEnabled then
+		local pos = seat.Position
+		local lp = lastCollisionPos
+		if lp then
+			local moved = Vector3.new(pos.X - lp.X, 0, pos.Z - lp.Z).Magnitude / math.max(dt, 1 / 240)
+			if
+				math.abs(currentSpeed) > fxcfg.collisionSpeed
+				and moved < math.abs(currentSpeed) * 0.35
+				and (os.clock() - lastCollisionAt) > 0.45
+			then
+				lastCollisionAt = os.clock()
+				seat:SetAttribute("ImpactAt", os.clock())
+				currentSpeed *= 0.4 -- 충돌 감속(튕기는 느낌)
+			end
+		end
+		lastCollisionPos = pos
+	end
 
 	-- 앞바퀴 조향 + 전체 바퀴 굴림 시각화
 	updateWheels(steer, dt)

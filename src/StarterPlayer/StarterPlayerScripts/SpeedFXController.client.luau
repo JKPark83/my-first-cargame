@@ -135,8 +135,11 @@ RunService.Heartbeat:Connect(function(dt: number)
 		local now = workspace:GetServerTimeNow()
 		local boostEnd = seat:GetAttribute("BoostEndTime") :: number?
 		local rocketEnd = seat:GetAttribute("RocketEndTime") :: number?
-		local boosting = (boostEnd ~= nil and now < boostEnd) or (rocketEnd ~= nil and now < rocketEnd)
-		boostF = boosting and 1 or 0
+		local nitroEnd = seat:GetAttribute("NitroEndTime") :: number? -- 드리프트 미니터보/로켓스타트
+			local boosting = (boostEnd ~= nil and now < boostEnd)
+				or (rocketEnd ~= nil and now < rocketEnd)
+				or (nitroEnd ~= nil and now < nitroEnd)
+			boostF = boosting and 1 or 0
 
 		-- 부스트 시작 순간: 펀치 + whoosh
 		if boosting and not prevBoosting then
