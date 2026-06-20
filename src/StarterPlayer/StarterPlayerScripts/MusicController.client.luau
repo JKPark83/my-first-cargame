@@ -91,20 +91,27 @@ Remotes.Event("RaceStateChanged").OnClientEvent:Connect(function(info)
 	applyDesired()
 end)
 
--- 두 곡을 백그라운드에서 미리 로드한 뒤 현재 상태에 맞는 곡 재생
+-- 로비 입장 즉시 BGM이 나오도록: 라운지 곡을 "먼저" 로드해 바로 재생하고,
+-- 레이스 곡은 그 뒤 백그라운드에서 이어서 로드한다(레이스 곡 로딩을 기다리지 않음).
 task.spawn(function()
 	loungeSound = loadFirstPlayable(cfg.loungeIds)
+	if not loungeSound then
+		-- 라운지 후보가 다 막혔으면 레이스 후보라도 라운지 음악으로 사용
+		loungeSound = loadFirstPlayable(cfg.raceIds)
+	end
+	applyDesired() -- 라운지 음악 즉시 시작(로비에서 바로 들림)
+
+	-- 레이스 곡은 이어서 로드(경주 시작 시 전환용)
 	raceSound = loadFirstPlayable(cfg.raceIds)
-	-- 레이스 곡만 로드되면 라운지에서도 그 곡을, 그 반대도 마찬가지로 대체 사용
+	if not raceSound then
+		raceSound = loungeSound -- 레이스 곡이 없으면 라운지 곡을 그대로 사용
+	end
 	if not loungeSound then
 		loungeSound = raceSound
-	end
-	if not raceSound then
-		raceSound = loungeSound
 	end
 	if not loungeSound and not raceSound then
 		warn("[MusicController] 재생 가능한 BGM 에셋이 없습니다. GameConfig.Music의 id를 동작하는 곡으로 바꿔주세요.")
 		return
 	end
-	applyDesired()
+	applyDesired() -- 로딩 중 상태가 바뀌었을 수 있으니 현재 상태에 맞게 재반영
 end)

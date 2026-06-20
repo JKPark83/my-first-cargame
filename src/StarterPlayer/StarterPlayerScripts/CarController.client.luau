@@ -74,13 +74,16 @@ local function updateEngineSound(seat: VehicleSeat, speedRatio: number, boosting
 	end
 	local cfg = GameConfig.Audio
 	local pitch = cfg.idlePlaybackSpeed + (cfg.maxPlaybackSpeed - cfg.idlePlaybackSpeed) * speedRatio
-	if boosting then
-		pitch += cfg.boostPitchBonus
-	end
 	local volume = cfg.idleVolume + (cfg.maxVolume - cfg.idleVolume) * speedRatio
-	-- 부드럽게 추종
-	engine.PlaybackSpeed += (pitch - engine.PlaybackSpeed) * 0.2
-	engine.Volume += (volume - engine.Volume) * 0.2
+	-- 부스트 순간 엔진음 극대화: 피치를 더 끌어올리고 볼륨을 최대로(굉음) + 빠르게 추종.
+	local follow = 0.2
+	if boosting then
+		pitch += cfg.boostPitchBonus * 1.6
+		volume = math.max(volume, cfg.maxVolume) * 1.15
+		follow = 0.45 -- 부스트 시 더 즉각적으로 치고 올라오게
+	end
+	engine.PlaybackSpeed += (pitch - engine.PlaybackSpeed) * follow
+	engine.Volume += (volume - engine.Volume) * follow
 end
 
 -- 엔진 사운드 자동 선택: 후보 id를 순회하며 "실제로 로드되는 첫 id"를 고른다.
