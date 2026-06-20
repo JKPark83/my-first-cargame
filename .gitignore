@@ -1,0 +1,19 @@
+# Rojo / Roblox build artifacts
+*.rbxl
+*.rbxlx
+*.rbxl.lock
+*.rbxlx.lock
+
+# Roblox Studio backups
+*.bak
+
+# Editor / OS
+.DS_Store
+.vscode/
+*.log
+
+# Wally package manager (if used later)
+/Packages
+/ServerPackages
+/DevPackages
+wally.lock
