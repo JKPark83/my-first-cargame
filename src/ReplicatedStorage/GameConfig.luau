@@ -242,12 +242,14 @@ GameConfig.Customization = {
 -- 트랙 / 경주
 -- =====================================================================
 GameConfig.Race = {
-	trackCount = 10, -- 절차적으로 만들 트랙 종류 수
+	trackCount = 6, -- 테마 트랙 종류 수 (Themes와 1:1 매핑)
 	maxPlayers = 8, -- 한 경주 최대 인원
 	minPlayers = 1, -- 경주 시작 최소 인원
 	lobbyCountdown = 15, -- 대기열에서 시작까지 카운트다운 (초)
-	laps = 2, -- 완주 랩 수
-	raceTimeLimit = 180, -- 경주 제한 시간 (초)
+	laps = 2, -- 완주 랩 수 (테마에 lapCount가 없을 때의 폴백 기본값)
+	avgSpeed = 120, -- 트랙 길이↔랩타임 환산용 평균 주행속도(studs/sec) 기준값
+	targetRaceSeconds = 120, -- 트랙별 랩 수 자동 계산 목표 총 경주 시간 (초)
+	raceTimeLimit = 240, -- 경주 제한 시간 (초)
 	progressBroadcastInterval = 0.15, -- 실시간 순위/미니맵 갱신 주기 (초)
 	entryLoadTime = 1.4, -- 경주 진입 로딩 화면 최소 표시 시간(트랙 생성/순간이동 히치 마스킹, 초)
 }
@@ -320,6 +322,229 @@ GameConfig.Items = {
 		range = 140, -- 사정거리 (스터드)
 		coneDot = 0.5, -- 전방 원뿔 정렬도(0~1, 클수록 정면만)
 		color = Color3.fromRGB(90, 190, 255),
+	},
+}
+
+-- =====================================================================
+-- 테마 트랙 (사탕/과자/동물/바다/우주/용암 나라)
+-- =====================================================================
+-- 각 트랙은 고유 테마를 가진다: 도로/난간/부스트/아이템박스 색, 조명 분위기,
+-- 테마 장식 소품(props), 그리고 목표 한 바퀴 시간(targetLapSeconds).
+-- TrackGenerator가 index로 테마를 1:1 선택해 길이/색/장식/조명을 적용하고,
+-- 랩 수는 targetLapSeconds로부터 "총 ~2분" 목표에 맞춰 자동 계산한다.
+--   props: TrackGenerator의 PROP_BUILDERS 키. 트랙 가장자리에 번갈아 배치된다.
+--   nodeCount: 루프 제어점 수(클수록 굴곡이 많아 모양이 다양해짐).
+GameConfig.Themes = {
+	-- ───────── 1. 사탕나라 (짧음 ~22초) ─────────
+	{
+		id = "candy",
+		displayName = "사탕나라 🍭",
+		emoji = "🍭",
+		targetLapSeconds = 22,
+		nodeCount = 16,
+		road = Color3.fromRGB(255, 150, 185),
+		roadMaterial = Enum.Material.SmoothPlastic,
+		wall = Color3.fromRGB(235, 110, 165),
+		railLeft = Color3.fromRGB(255, 90, 140),
+		railRight = Color3.fromRGB(255, 240, 248),
+		lane = Color3.fromRGB(255, 255, 255),
+		edge = Color3.fromRGB(255, 235, 245),
+		boostPad = Color3.fromRGB(255, 220, 60),
+		itemBox = Color3.fromRGB(190, 100, 230),
+		oil = Color3.fromRGB(150, 70, 110),
+		decorA = Color3.fromRGB(135, 206, 250),
+		decorB = Color3.fromRGB(255, 150, 120),
+		props = { "lollipop", "donut", "cake" },
+		lighting = {
+			clockTime = 14,
+			brightness = 2.4,
+			ambient = Color3.fromRGB(120, 95, 110),
+			outdoor = Color3.fromRGB(205, 170, 190),
+			fog = Color3.fromRGB(255, 225, 240),
+			fogStart = 250,
+			fogEnd = 2200,
+		},
+	},
+	-- ───────── 2. 과자나라 (짧음 ~25초) ─────────
+	{
+		id = "snack",
+		displayName = "과자나라 🍪",
+		emoji = "🍪",
+		targetLapSeconds = 25,
+		nodeCount = 14,
+		road = Color3.fromRGB(120, 80, 45),
+		roadMaterial = Enum.Material.Sand,
+		wall = Color3.fromRGB(160, 110, 65),
+		railLeft = Color3.fromRGB(89, 47, 19),
+		railRight = Color3.fromRGB(255, 235, 200),
+		lane = Color3.fromRGB(255, 228, 196),
+		edge = Color3.fromRGB(255, 240, 215),
+		boostPad = Color3.fromRGB(255, 195, 20),
+		itemBox = Color3.fromRGB(255, 110, 150),
+		oil = Color3.fromRGB(70, 45, 25),
+		decorA = Color3.fromRGB(255, 245, 220),
+		decorB = Color3.fromRGB(120, 70, 35),
+		props = { "cookie", "icecream", "donut" },
+		lighting = {
+			clockTime = 15,
+			brightness = 2.3,
+			ambient = Color3.fromRGB(120, 100, 75),
+			outdoor = Color3.fromRGB(205, 185, 150),
+			fog = Color3.fromRGB(255, 238, 205),
+			fogStart = 250,
+			fogEnd = 2000,
+		},
+	},
+	-- ───────── 3. 동물나라 (중간 ~28초) ─────────
+	{
+		id = "animal",
+		displayName = "동물나라 🐾",
+		emoji = "🐾",
+		targetLapSeconds = 28,
+		nodeCount = 18,
+		road = Color3.fromRGB(170, 140, 95),
+		roadMaterial = Enum.Material.Ground,
+		wall = Color3.fromRGB(120, 80, 40),
+		railLeft = Color3.fromRGB(95, 60, 30),
+		railRight = Color3.fromRGB(235, 220, 180),
+		lane = Color3.fromRGB(255, 240, 170),
+		edge = Color3.fromRGB(240, 235, 210),
+		boostPad = Color3.fromRGB(90, 220, 60),
+		itemBox = Color3.fromRGB(255, 165, 35),
+		oil = Color3.fromRGB(70, 55, 30),
+		decorA = Color3.fromRGB(60, 165, 60),
+		decorB = Color3.fromRGB(255, 215, 45),
+		props = { "tree", "sunflower", "mushroom" },
+		lighting = {
+			clockTime = 13,
+			brightness = 2.8,
+			ambient = Color3.fromRGB(120, 140, 110),
+			outdoor = Color3.fromRGB(180, 200, 170),
+			fog = Color3.fromRGB(210, 235, 200),
+			fogStart = 350,
+			fogEnd = 3000,
+		},
+	},
+	-- ───────── 4. 바다나라 (긺 ~32초) ─────────
+	{
+		id = "sea",
+		displayName = "바다나라 🐠",
+		emoji = "🐠",
+		targetLapSeconds = 32,
+		nodeCount = 16,
+		road = Color3.fromRGB(30, 80, 120),
+		roadMaterial = Enum.Material.SmoothPlastic,
+		wall = Color3.fromRGB(40, 110, 150),
+		railLeft = Color3.fromRGB(255, 110, 75),
+		railRight = Color3.fromRGB(150, 235, 255),
+		lane = Color3.fromRGB(120, 230, 255),
+		edge = Color3.fromRGB(190, 240, 255),
+		boostPad = Color3.fromRGB(255, 225, 60),
+		itemBox = Color3.fromRGB(190, 235, 255),
+		oil = Color3.fromRGB(20, 50, 80),
+		decorA = Color3.fromRGB(255, 110, 80),
+		decorB = Color3.fromRGB(0, 200, 175),
+		props = { "coral", "seaweed", "starfish" },
+		lighting = {
+			clockTime = 14,
+			brightness = 1.7,
+			ambient = Color3.fromRGB(20, 55, 95),
+			outdoor = Color3.fromRGB(40, 90, 140),
+			fog = Color3.fromRGB(15, 80, 150),
+			fogStart = 60,
+			fogEnd = 750,
+		},
+	},
+	-- ───────── 5. 우주나라 (긺 ~36초) ─────────
+	{
+		id = "space",
+		displayName = "우주나라 🚀",
+		emoji = "🚀",
+		targetLapSeconds = 36,
+		nodeCount = 14,
+		road = Color3.fromRGB(28, 26, 55),
+		roadMaterial = Enum.Material.Neon,
+		wall = Color3.fromRGB(60, 25, 100),
+		railLeft = Color3.fromRGB(0, 190, 255),
+		railRight = Color3.fromRGB(180, 90, 255),
+		lane = Color3.fromRGB(120, 200, 255),
+		edge = Color3.fromRGB(150, 170, 255),
+		boostPad = Color3.fromRGB(255, 215, 0),
+		itemBox = Color3.fromRGB(170, 60, 255),
+		oil = Color3.fromRGB(15, 12, 35),
+		decorA = Color3.fromRGB(220, 230, 255),
+		decorB = Color3.fromRGB(210, 80, 40),
+		props = { "rocket", "planet", "star" },
+		lighting = {
+			clockTime = 0,
+			brightness = 1.1,
+			ambient = Color3.fromRGB(14, 14, 34),
+			outdoor = Color3.fromRGB(22, 22, 48),
+			fog = Color3.fromRGB(6, 6, 20),
+			fogStart = 200,
+			fogEnd = 1800,
+		},
+	},
+	-- ───────── 6. 용암나라 (긺 ~40초) ─────────
+	{
+		id = "lava",
+		displayName = "용암나라 🌋",
+		emoji = "🌋",
+		targetLapSeconds = 40,
+		nodeCount = 20,
+		road = Color3.fromRGB(40, 32, 28),
+		roadMaterial = Enum.Material.Slate,
+		wall = Color3.fromRGB(55, 38, 28),
+		railLeft = Color3.fromRGB(255, 90, 0),
+		railRight = Color3.fromRGB(255, 170, 40),
+		lane = Color3.fromRGB(255, 120, 20),
+		edge = Color3.fromRGB(120, 70, 45),
+		boostPad = Color3.fromRGB(255, 150, 0),
+		itemBox = Color3.fromRGB(255, 205, 0),
+		oil = Color3.fromRGB(20, 15, 12),
+		decorA = Color3.fromRGB(225, 60, 0),
+		decorB = Color3.fromRGB(55, 40, 30),
+		props = { "rock", "lavapillar", "volcano" },
+		lighting = {
+			clockTime = 19,
+			brightness = 1.5,
+			ambient = Color3.fromRGB(65, 22, 12),
+			outdoor = Color3.fromRGB(115, 50, 28),
+			fog = Color3.fromRGB(125, 42, 16),
+			fogStart = 90,
+			fogEnd = 850,
+		},
+	},
+}
+
+-- =====================================================================
+-- AI 봇 (빈 자리 채우기)
+-- =====================================================================
+-- 실제 플레이어가 maxPlayers보다 적으면 나머지를 AI 봇으로 채워 항상 경주가 성립한다.
+-- 봇은 키네매틱(앵커 후 트랙 경로 추종)으로 움직이며 서로/플레이어와 충돌하지 않는다.
+-- 난이도 "중간": 사람이 충분히 이길 수 있는 속도 + 약한 고무줄(경기 접전 유지).
+GameConfig.Bots = {
+	enabled = true,
+	difficulty = "medium",
+	carId = "city_hatch", -- 봇이 모는 차(외형 전용, 주행은 키네매틱)
+	-- 난이도 "중간": 고무줄 기준은 "사람 선두"라 사람이 뒤처지면 봇도 느려져 충분히 이길 수 있다.
+	baseSpeed = 78, -- 사람과 진행도가 같을 때의 기본 속도(studs/sec)
+	speedVariance = 8, -- 봇별 고정 속도 편차(±)
+	rubberbandGain = 3.0, -- 사람 선두와의 진행 차이(체크포인트)당 속도 보정
+	rubberbandMin = -16, -- 사람보다 앞설 때 최대 감속(사람이 따라잡게)
+	rubberbandMax = 24, -- 사람보다 뒤처질 때 최대 가속(접전 유지)
+	minSpeed = 55,
+	maxSpeed = 125,
+	names = { "번개", "초코", "별이", "토토", "쌩쌩", "구름", "단비", "뭉치", "하트", "코코" },
+	bodyColors = {
+		{ 255, 95, 95 },
+		{ 90, 160, 255 },
+		{ 95, 210, 130 },
+		{ 255, 200, 60 },
+		{ 200, 120, 255 },
+		{ 255, 140, 60 },
+		{ 120, 220, 220 },
+		{ 245, 120, 180 },
 	},
 }
 

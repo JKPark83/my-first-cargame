@@ -21,6 +21,35 @@ local player = Players.LocalPlayer
 local activeSeat: VehicleSeat? = nil
 local currentSpeed = 0 -- 현재 전진 속도(음수 = 후진)
 
+-- 점프 잠금 가드: 탑승 중 점프(=VehicleSeat 자동 하차)를 막는다.
+-- 서버에서 JumpPower=0만으로는 하차가 확실히 막히지 않으므로,
+-- 캐릭터를 소유한 클라이언트에서 Jumping 상태 자체를 비활성화한다.
+-- 하차(정상) 시 원래 점프 능력으로 복구한다.
+local jumpGuard: { humanoid: Humanoid, power: number, height: number }? = nil
+
+local function disableJumpFor(humanoid: Humanoid)
+	if jumpGuard and jumpGuard.humanoid == humanoid then
+		return -- 이미 같은 휴머노이드에 적용됨
+	end
+	jumpGuard = { humanoid = humanoid, power = humanoid.JumpPower, height = humanoid.JumpHeight }
+	humanoid:SetStateEnabled(Enum.HumanoidStateType.Jumping, false)
+	humanoid.JumpPower = 0
+	humanoid.JumpHeight = 0
+end
+
+local function restoreJump()
+	local g = jumpGuard
+	if not g then
+		return
+	end
+	if g.humanoid and g.humanoid.Parent then
+		g.humanoid:SetStateEnabled(Enum.HumanoidStateType.Jumping, true)
+		g.humanoid.JumpPower = g.power
+		g.humanoid.JumpHeight = g.height
+	end
+	jumpGuard = nil
+end
+
 -- 바퀴 시각화 상태 (앞바퀴 조향 + 전체 바퀴 굴림)
 -- 시트에 Motor6D로 연결된 타이어들의 C0를 매 프레임 회전시킨다.
 local wheelMotors: { { motor: Motor6D, base: CFrame, front: boolean } } = {}
@@ -152,10 +181,22 @@ RunService.Heartbeat:Connect(function(dt: number)
 		if seat then
 			ensureEngineSound(seat) -- 새 차량 탑승 시 동작하는 엔진 사운드 선택
 			cacheWheels(seat) -- 바퀴 Motor6D 캐시
+			-- 탑승 즉시 점프 잠금(점프로 차에서 내려지는 것 방지)
+			local character = player.Character
+			local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+			if humanoid then
+				disableJumpFor(humanoid)
+			end
+		else
+			restoreJump() -- 차에서 내리면(라운지 복귀 등) 점프 복구
 		end
 	end
 	if not seat then
 		return
+	end
+	-- 탑승 중에는 매 프레임 점프 잠금을 재확인(다른 스크립트/리스폰이 풀어도 유지)
+	if jumpGuard then
+		jumpGuard.humanoid:SetStateEnabled(Enum.HumanoidStateType.Jumping, false)
 	end
 	-- 출발 카운트다운 중에는 차량이 고정(Anchored)됨
 	if seat.Anchored then

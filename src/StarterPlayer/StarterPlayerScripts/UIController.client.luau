@@ -937,7 +937,7 @@ local function showResults(results: { any })
 		make("TextLabel", {
 			Size = UDim2.new(1, 0, 0, 40),
 			BackgroundColor3 = Color3.fromRGB(34, 38, 50),
-			Text = ("%s   %s%s"):format(placeText, r.name, timeText),
+			Text = ("%s   %s%s%s"):format(placeText, r.isBot and "🤖 " or "", r.name, timeText),
 			TextColor3 = i <= 3 and Color3.fromRGB(245, 220, 90) or Color3.fromRGB(220, 225, 235),
 			Font = Enum.Font.GothamMedium,
 			TextScaled = true,
@@ -1054,15 +1054,27 @@ end
 -- 실시간 순위 HUD
 -- =====================================================================
 local rankHud = make("Frame", {
-	Size = UDim2.new(0, 240, 0, 220),
-	Position = UDim2.new(1, -256, 0, 200),
+	Size = UDim2.new(0, 248, 0, 270),
+	Position = UDim2.new(1, -264, 0, 176),
 	BackgroundColor3 = Color3.fromRGB(15, 18, 26),
 	BackgroundTransparency = 0.25,
 	Visible = false,
 }, gui)
 corner(10, rankHud)
+-- ① 내 순위 (크게) — "내 순위 N / 총원"
+local placeLabel = make("TextLabel", {
+	Size = UDim2.new(1, 0, 0, 44),
+	BackgroundColor3 = Color3.fromRGB(40, 150, 90),
+	Text = "내 순위 - / -",
+	TextColor3 = Color3.fromRGB(255, 255, 255),
+	Font = Enum.Font.GothamBlack,
+	TextScaled = true,
+}, rankHud)
+corner(10, placeLabel)
+-- ② 남은 바퀴 + 현재 랩
 local lapLabel = make("TextLabel", {
-	Size = UDim2.new(1, 0, 0, 34),
+	Size = UDim2.new(1, 0, 0, 32),
+	Position = UDim2.new(0, 0, 0, 46),
 	BackgroundColor3 = Color3.fromRGB(40, 110, 200),
 	Text = "LAP 1/2",
 	TextColor3 = Color3.fromRGB(255, 255, 255),
@@ -1071,8 +1083,8 @@ local lapLabel = make("TextLabel", {
 }, rankHud)
 corner(10, lapLabel)
 local rankList = make("Frame", {
-	Size = UDim2.new(1, -12, 1, -42),
-	Position = UDim2.new(0, 6, 0, 38),
+	Size = UDim2.new(1, -12, 1, -88),
+	Position = UDim2.new(0, 6, 0, 84),
 	BackgroundTransparency = 1,
 }, rankHud)
 make("UIListLayout", { Padding = UDim.new(0, 3), SortOrder = Enum.SortOrder.LayoutOrder }, rankList)
@@ -1083,22 +1095,161 @@ local function updateRankHud(racers: { any }, totalLaps: number)
 			c:Destroy()
 		end
 	end
+	local totalPlayers = #racers
 	for i, r in ipairs(racers) do
 		local isMe = r.userId == player.UserId
 		if isMe then
-			lapLabel.Text = r.finished and "🏁 완주!" or ("LAP %d/%d"):format(r.lap, totalLaps)
+			-- 내 순위 (예: "내 순위 2 / 6")
+			placeLabel.Text = r.finished and "🏁 완주!" or ("내 순위 %d / %d"):format(i, totalPlayers)
+			placeLabel.BackgroundColor3 = r.finished and Color3.fromRGB(210, 160, 30)
+				or (i == 1 and Color3.fromRGB(40, 150, 90) or Color3.fromRGB(48, 70, 110))
+			-- 남은 바퀴 (현재 r.lap 진행 중, 총 totalLaps 바퀴)
+			if r.finished then
+				lapLabel.Text = "완주 완료!"
+			else
+				local remaining = math.max(0, totalLaps - r.lap)
+				if remaining <= 0 then
+					lapLabel.Text = ("🏁 마지막 바퀴! (LAP %d/%d)"):format(r.lap, totalLaps)
+				else
+					lapLabel.Text = ("%d바퀴 남음  (LAP %d/%d)"):format(remaining, r.lap, totalLaps)
+				end
+			end
 		end
 		make("TextLabel", {
 			Size = UDim2.new(1, 0, 0, 24),
 			BackgroundColor3 = isMe and Color3.fromRGB(50, 110, 70) or Color3.fromRGB(34, 38, 50),
 			BackgroundTransparency = 0.1,
-			Text = ("%d. %s"):format(i, string.sub(r.name, 1, 14)),
+			Text = ("%d. %s%s"):format(i, r.isBot and "🤖" or "", string.sub(r.name, 1, 12)),
 			TextColor3 = Color3.fromRGB(240, 245, 255),
 			Font = isMe and Enum.Font.GothamBold or Enum.Font.Gotham,
 			TextScaled = true,
 			TextXAlignment = Enum.TextXAlignment.Left,
 			LayoutOrder = i,
 		}, rankList)
+	end
+end
+
+-- =====================================================================
+-- 🏁 포디움(1·2·3등) — 화면 우상단, 현재 상위 3명의 캐릭터(아바타)를 표시
+-- =====================================================================
+local MEDALS = { "🥇", "🥈", "🥉" }
+local thumbCache: { [number]: string } = {}
+
+-- 사람 플레이어의 얼굴 썸네일을 비동기로 요청해 캐시 (봇/음수 id는 제외)
+local function requestHeadshot(userId: number)
+	if thumbCache[userId] or userId <= 0 then
+		return -- 이미 요청/캐시됨(빈 문자열 플레이스홀더 포함) 또는 봇
+	end
+	thumbCache[userId] = "" -- 중복 요청 방지용 플레이스홀더
+	task.spawn(function()
+		local ok, content = pcall(function()
+			return Players:GetUserThumbnailAsync(
+				userId,
+				Enum.ThumbnailType.HeadShot,
+				Enum.ThumbnailSize.Size150x150
+			)
+		end)
+		if ok and content then
+			thumbCache[userId] = content
+		end
+	end)
+end
+
+local podium = make("Frame", {
+	Size = UDim2.new(0, 248, 0, 116),
+	Position = UDim2.new(1, -264, 0, 8),
+	BackgroundColor3 = Color3.fromRGB(15, 18, 26),
+	BackgroundTransparency = 0.25,
+	Visible = false,
+}, gui)
+corner(12, podium)
+make("TextLabel", {
+	Size = UDim2.new(1, 0, 0, 18),
+	BackgroundTransparency = 1,
+	Text = "🏁 현재 순위 TOP 3",
+	TextColor3 = Color3.fromRGB(255, 226, 120),
+	Font = Enum.Font.GothamBold,
+	TextScaled = true,
+}, podium)
+
+local PODIUM_CELL_W = 76
+local podiumCells: { any } = {}
+for i = 1, 3 do
+	local cell = make("Frame", {
+		Size = UDim2.new(0, PODIUM_CELL_W, 0, 90),
+		Position = UDim2.new(0, 8 + (i - 1) * (PODIUM_CELL_W + 2), 0, 22),
+		BackgroundColor3 = Color3.fromRGB(34, 38, 50),
+		BackgroundTransparency = 0.2,
+	}, podium)
+	corner(8, cell)
+	make("TextLabel", {
+		Size = UDim2.new(1, 0, 0, 18),
+		Position = UDim2.new(0, 0, 0, 2),
+		BackgroundTransparency = 1,
+		Text = MEDALS[i],
+		Font = Enum.Font.GothamBold,
+		TextScaled = true,
+	}, cell)
+	local avatar = make("ImageLabel", {
+		Size = UDim2.new(0, 46, 0, 46),
+		Position = UDim2.new(0.5, -23, 0, 22),
+		BackgroundColor3 = Color3.fromRGB(20, 22, 30),
+		BackgroundTransparency = 0.2,
+		Image = "",
+		ScaleType = Enum.ScaleType.Fit,
+	}, cell)
+	corner(23, avatar)
+	local emoji = make("TextLabel", {
+		Size = UDim2.new(0, 46, 0, 46),
+		Position = UDim2.new(0.5, -23, 0, 22),
+		BackgroundTransparency = 1,
+		Text = "🤖",
+		Font = Enum.Font.GothamBold,
+		TextScaled = true,
+		Visible = false,
+	}, cell)
+	local nameL = make("TextLabel", {
+		Size = UDim2.new(1, -4, 0, 18),
+		Position = UDim2.new(0, 2, 1, -20),
+		BackgroundTransparency = 1,
+		Text = "-",
+		TextColor3 = Color3.fromRGB(240, 245, 255),
+		Font = Enum.Font.Gotham,
+		TextScaled = true,
+	}, cell)
+	podiumCells[i] = { cell = cell, avatar = avatar, emoji = emoji, name = nameL }
+end
+
+-- 서버가 보낸 ranked racers(1등부터)로 포디움 3칸 갱신
+local function updatePodium(racers: { any })
+	for i = 1, 3 do
+		local c = podiumCells[i]
+		local r = racers[i]
+		if r then
+			local label = string.sub(tostring(r.name or "?"), 1, 8)
+			local isMe = r.userId == player.UserId
+			c.name.Text = isMe and ("⭐ " .. label) or label
+			c.name.TextColor3 = isMe and Color3.fromRGB(120, 255, 160) or Color3.fromRGB(240, 245, 255)
+			if r.isBot then
+				c.avatar.Visible = false
+				c.emoji.Visible = true
+			else
+				c.emoji.Visible = false
+				c.avatar.Visible = true
+				local img = thumbCache[r.userId]
+				if img and img ~= "" then
+					c.avatar.Image = img
+				else
+					c.avatar.Image = ""
+					requestHeadshot(r.userId)
+				end
+			end
+		else
+			c.name.Text = "-"
+			c.avatar.Visible = true
+			c.avatar.Image = ""
+			c.emoji.Visible = false
+		end
 	end
 end
 
@@ -1477,6 +1628,7 @@ Remotes.Event("RaceStateChanged").OnClientEvent:Connect(function(info)
 		queueStatus.Visible = false
 		minimap.Visible = false
 		rankHud.Visible = false
+		podium.Visible = false
 		statusIndicator.Visible = false
 		currentItem = nil
 		refreshItemSlot()
@@ -1508,6 +1660,12 @@ Remotes.Event("RaceSetup").OnClientEvent:Connect(function(info)
 		buildMinimapOutline(info.path, info.bounds)
 		minimap.Visible = true
 		rankHud.Visible = true
+		podium.Visible = true
+		-- 출발 전 HUD 초기 표시(첫 RaceProgress 도착 전까지)
+		local totalLaps = info.laps or 2
+		placeLabel.Text = "곧 출발!"
+		placeLabel.BackgroundColor3 = Color3.fromRGB(48, 70, 110)
+		lapLabel.Text = ("총 %d바퀴"):format(totalLaps)
 	end
 end)
 
@@ -1516,6 +1674,7 @@ Remotes.Event("RaceProgress").OnClientEvent:Connect(function(info)
 	if info.racers then
 		updateMinimapCars(info.racers)
 		updateRankHud(info.racers, info.laps or 2)
+		updatePodium(info.racers)
 	end
 end)
 

@@ -14,6 +14,7 @@
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Lighting = game:GetService("Lighting")
 
 local GameConfig = require(ReplicatedStorage.GameConfig)
 local Remotes = require(ReplicatedStorage.Remotes)
@@ -28,7 +29,10 @@ local RaceManager = {}
 local CHECKPOINT_RADIUS = 30 -- 체크포인트 통과 판정 거리(평면)
 
 type RacerState = {
-	player: Player,
+	player: Player?, -- 봇이면 nil
+	isBot: boolean, -- AI 봇 여부
+	userId: number, -- 사람=UserId, 봇=음수 합성 id (racers 테이블 키)
+	name: string, -- 차 이름표/순위 표시용 이름
 	car: Model?,
 	nextCp: number, -- 다음으로 통과해야 할 체크포인트(1~N)
 	lap: number,
@@ -37,6 +41,11 @@ type RacerState = {
 	finishTime: number?,
 	place: number?,
 	item: string?, -- 보유 중인 아이템 id (없으면 nil)
+	-- 봇 키네매틱 주행 상태
+	route: { Vector3 }?, -- 따라가는 경로(트랙 minimapPath)
+	routePos: number?, -- 경로상의 부동소수 인덱스(정수부=세그먼트, 소수부=세그먼트 내 진행)
+	speed: number?, -- 봇 기본 주행 속도(studs/sec)
+	laneOffset: number?, -- 중앙선 기준 좌우 차선 오프셋(봇끼리 겹침 방지)
 }
 
 local state = "Idle"
@@ -45,6 +54,66 @@ local racers: { [number]: RacerState } = {} -- userId -> RacerState
 local currentTrack: TrackGenerator.TrackInfo? = nil
 local raceConnection: RBXScriptConnection? = nil
 local countdownActive = false
+
+-- 라운지(기본) 조명 스냅샷 — init에서 1회 캡처, 테마 적용 후 복원에 사용
+type LightingSnapshot = {
+	clockTime: number,
+	brightness: number,
+	ambient: Color3,
+	outdoor: Color3,
+	fog: Color3,
+	fogStart: number,
+	fogEnd: number,
+}
+local defaultLighting: LightingSnapshot? = nil
+
+local function captureLighting(): LightingSnapshot
+	return {
+		clockTime = Lighting.ClockTime,
+		brightness = Lighting.Brightness,
+		ambient = Lighting.Ambient,
+		outdoor = Lighting.OutdoorAmbient,
+		fog = Lighting.FogColor,
+		fogStart = Lighting.FogStart,
+		fogEnd = Lighting.FogEnd,
+	}
+end
+
+local function applyLighting(l: LightingSnapshot)
+	Lighting.ClockTime = l.clockTime
+	Lighting.Brightness = l.brightness
+	Lighting.Ambient = l.ambient
+	Lighting.OutdoorAmbient = l.outdoor
+	Lighting.FogColor = l.fog
+	Lighting.FogStart = l.fogStart
+	Lighting.FogEnd = l.fogEnd
+end
+
+-- 테마 조명 적용 (테마에 lighting이 없으면 기본 유지)
+local function applyThemeLighting(lighting: TrackGenerator.ThemeLighting?)
+	if not lighting then
+		return
+	end
+	if not defaultLighting then
+		defaultLighting = captureLighting()
+	end
+	applyLighting({
+		clockTime = lighting.clockTime,
+		brightness = lighting.brightness,
+		ambient = lighting.ambient,
+		outdoor = lighting.outdoor,
+		fog = lighting.fog,
+		fogStart = lighting.fogStart,
+		fogEnd = lighting.fogEnd,
+	})
+end
+
+-- 라운지 기본 조명으로 복원
+local function restoreLighting()
+	if defaultLighting then
+		applyLighting(defaultLighting)
+	end
+end
 
 -- =====================================================================
 -- 유틸
@@ -162,6 +231,59 @@ end
 -- =====================================================================
 -- 경주 시작
 -- =====================================================================
+-- =====================================================================
+-- AI 봇 키네매틱 주행
+-- =====================================================================
+local BOT_RIDE_HEIGHT = 0.8 -- 시트 중심 높이(바퀴가 지면에 닿도록; 도로 윗면 y=0 기준)
+
+-- 경로(route)상의 부동소수 인덱스 routePos에서 차량 CFrame을 계산
+local function botCFrameAt(route: { Vector3 }, routePos: number, laneOffset: number): CFrame
+	local n = #route
+	local baseIdx = math.floor(routePos)
+	local frac = routePos - baseIdx
+	local i0 = ((baseIdx - 1) % n) + 1
+	local i1 = (i0 % n) + 1
+	local a, b = route[i0], route[i1]
+	local pos = a:Lerp(b, frac)
+	local dir = b - a
+	local flat = Vector3.new(dir.X, 0, dir.Z)
+	local look = if flat.Magnitude > 0.01 then CFrame.lookAt(pos, pos + flat.Unit) else CFrame.new(pos)
+	return look * CFrame.new(laneOffset, BOT_RIDE_HEIGHT, 0)
+end
+
+-- 봇 한 명을 dt만큼 경로를 따라 전진시키고 차량을 이동
+local function advanceBot(racer: RacerState, dt: number, leaderProgress: number)
+	local route = racer.route
+	local car = racer.car
+	if not route or #route < 2 or not car or not car.PrimaryPart then
+		return
+	end
+	local cfg = (GameConfig :: any).Bots
+	-- 고무줄 보정: 선두와 진행도(통과 체크포인트 수) 차이에 따라 속도 가감
+	local behind = leaderProgress - racer.progress
+	local adjust = math.clamp(behind * cfg.rubberbandGain, cfg.rubberbandMin, cfg.rubberbandMax)
+	local speed = math.clamp((racer.speed or cfg.baseSpeed) + adjust, cfg.minSpeed, cfg.maxSpeed)
+
+	local n = #route
+	local routePos = racer.routePos or 1
+	local baseIdx = math.floor(routePos)
+	local frac = routePos - baseIdx
+	local i0 = ((baseIdx - 1) % n) + 1
+	local i1 = (i0 % n) + 1
+	local segLen = math.max((route[i1] - route[i0]).Magnitude, 0.1)
+	frac += (speed * dt) / segLen
+	-- 한 프레임에 여러 세그먼트를 넘길 수 있으니 루프 처리
+	while frac >= 1 do
+		frac -= 1
+		baseIdx += 1
+		i0 = ((baseIdx - 1) % n) + 1
+		i1 = (i0 % n) + 1
+		segLen = math.max((route[i1] - route[i0]).Magnitude, 0.1)
+	end
+	racer.routePos = baseIdx + frac
+	car:PivotTo(botCFrameAt(route, racer.routePos, racer.laneOffset or 0))
+end
+
 function RaceManager.startRace()
 	if state == "Racing" then
 		return
@@ -201,6 +323,9 @@ function RaceManager.startRace()
 	currentTrack = TrackGenerator.build(trackIndex, trackFolder)
 	local track = currentTrack :: TrackGenerator.TrackInfo
 
+	-- 테마 조명 적용(분위기). 라운지 기본값은 init에서 캡처해 두고 종료 시 복원.
+	applyThemeLighting(track.lighting)
+
 	-- 차량 스폰 + 레이서 상태 초기화
 	racers = {}
 	for i, player in ipairs(participants) do
@@ -208,12 +333,46 @@ function RaceManager.startRace()
 		local car = CarSpawner.spawnFor(player, spawnCFrame, trackFolder)
 		racers[player.UserId] = {
 			player = player,
+			isBot = false,
+			userId = player.UserId,
+			name = player.DisplayName,
 			car = car,
 			nextCp = 2, -- 출발선(cp1) 뒤에서 시작 → 다음은 2번
 			lap = 0,
 			progress = 0,
 			finished = false,
 		}
+	end
+
+	-- 빈 자리를 AI 봇으로 채워 항상 경주가 성립하게 함(실제 인원 < maxPlayers)
+	local botCfg = (GameConfig :: any).Bots
+	if botCfg and botCfg.enabled then
+		local route = track.minimapPath
+		local need = GameConfig.Race.maxPlayers - #participants
+		for j = 1, need do
+			local botName = botCfg.names[((j - 1) % #botCfg.names) + 1]
+			local bodyColor = botCfg.bodyColors[((j - 1) % #botCfg.bodyColors) + 1]
+			-- 시작선 부근에서 조금씩 뒤로 stagger + 좌우로 분산해 봇끼리 겹치지 않게
+			local laneOffset = (((j - 1) % 5) - 2) * 7
+			local routePos = 1 - j * 0.7
+			local botUserId = -(1000 + j) -- 실제 UserId와 충돌하지 않는 음수 키
+			local car = CarSpawner.spawnBot(botCFrameAt(route, routePos, laneOffset), trackFolder, botName, bodyColor)
+			racers[botUserId] = {
+				player = nil,
+				isBot = true,
+				userId = botUserId,
+				name = botName,
+				car = car,
+				nextCp = 2,
+				lap = 0,
+				progress = 0,
+				finished = false,
+				route = route,
+				routePos = routePos,
+				speed = botCfg.baseSpeed + (math.random() - 0.5) * 2 * botCfg.speedVariance,
+				laneOffset = laneOffset,
+			}
+		end
 	end
 
 	-- 부스트 패드 / 오일 슬릭 상호작용 연결
@@ -226,7 +385,7 @@ function RaceManager.startRace()
 	end
 	Remotes.Event("RaceSetup"):FireAllClients({
 		track = track.displayName,
-		laps = GameConfig.Race.laps,
+		laps = track.lapCount,
 		path = pathData,
 		bounds = track.bounds,
 	})
@@ -253,15 +412,30 @@ function RaceManager.startRace()
 	Remotes.Event("RaceStateChanged"):FireAllClients({
 		state = "Racing",
 		track = track.displayName,
-		laps = GameConfig.Race.laps,
+		laps = track.lapCount,
 	})
 end
 
 function RaceManager.freezeCars(frozen: boolean)
 	for _, racer in pairs(racers) do
+		-- 봇은 키네매틱(항상 앵커, 서버가 CFrame으로 이동) → 고정/해제 대상에서 제외
+		if racer.isBot then
+			continue
+		end
 		local car = racer.car
 		if car and car.PrimaryPart then
-			car.PrimaryPart.Anchored = frozen
+			local seat = car.PrimaryPart
+			seat.Anchored = frozen
+			-- ⚠️ 출발 직후 차가 안 움직이던 버그 수정:
+			-- 스폰 시 deferred SetNetworkOwner가 freezeCars(true)의 Anchored=true 이후 실행돼
+			-- 실패(앵커된 파트는 소유권 지정 불가)하면서 서버가 소유권을 계속 쥔다.
+			-- 고정 해제(frozen=false) 시 시트 소유권을 플레이어에게 다시 넘겨
+			-- 클라이언트 입력이 차량에 반영되게 한다(내렸다 다시 타지 않아도 움직임).
+			if not frozen then
+				pcall(function()
+					seat:SetNetworkOwner(racer.player)
+				end)
+			end
 		end
 	end
 end
@@ -470,7 +644,8 @@ local function findFreezeTarget(racer: RacerState): RacerState?
 	local best: RacerState? = nil
 	local bestDist = math.huge
 	for _, other in pairs(racers) do
-		if other.player.UserId ~= racer.player.UserId and other.car and other.car.PrimaryPart and not other.finished then
+		-- 봇은 키네매틱이라 아이템 효과 면역 → 물풍선 대상에서 제외
+		if not other.isBot and other.userId ~= racer.userId and other.car and other.car.PrimaryPart and not other.finished then
 			local toOther = other.car.PrimaryPart.Position - origin
 			local dist = toOther.Magnitude
 			if dist > 1 and dist <= cfg.range then
@@ -622,16 +797,21 @@ function RaceManager.broadcastProgress(track: TrackGenerator.TrackInfo)
 	for rank, racer in ipairs(ranked) do
 		local pos = racer.car and racer.car.PrimaryPart and racer.car.PrimaryPart.Position or Vector3.zero
 		payload[rank] = {
-			userId = racer.player.UserId,
-			name = racer.player.DisplayName,
+			userId = racer.userId,
+			name = racer.name,
+			isBot = racer.isBot,
 			x = pos.X,
 			z = pos.Z,
 			place = rank,
-			lap = math.min(racer.lap + 1, GameConfig.Race.laps),
+			lap = math.min(racer.lap + 1, track.lapCount),
 			finished = racer.finished,
 		}
 	end
-	Remotes.Event("RaceProgress"):FireAllClients({ racers = payload, laps = GameConfig.Race.laps })
+	Remotes.Event("RaceProgress"):FireAllClients({
+		racers = payload,
+		laps = track.lapCount,
+		total = #ranked, -- 전체 참가 인원(순위 "N/총원" 표시용)
+	})
 end
 
 -- =====================================================================
@@ -656,6 +836,33 @@ function RaceManager.beginTracking()
 		end
 		local n = track.checkpointCount
 
+		-- 봇 키네매틱 주행 갱신(체크포인트 판정 전에 위치를 최신화)
+		-- 고무줄 기준 = "사람 선두의 진행도". 사람이 앞서면 봇이 가속, 뒤처지면 봇이 감속 →
+		-- 항상 접전을 유지하되 사람이 충분히 이길 수 있는 난이도(중간).
+		local humanLead = 0
+		local anyHumanProg = false
+		for _, r in pairs(racers) do
+			if not r.isBot then
+				anyHumanProg = true
+				if r.progress > humanLead then
+					humanLead = r.progress
+				end
+			end
+		end
+		if not anyHumanProg then
+			-- 사람이 없으면(전원 완주/퇴장 직전) 봇 진행도 최대값을 기준으로
+			for _, r in pairs(racers) do
+				if r.progress > humanLead then
+					humanLead = r.progress
+				end
+			end
+		end
+		for _, r in pairs(racers) do
+			if r.isBot and not r.finished then
+				advanceBot(r, dt, humanLead)
+			end
+		end
+
 		for _, racer in pairs(racers) do
 			if racer.finished then
 				continue
@@ -673,7 +880,7 @@ function RaceManager.beginTracking()
 					racer.progress += 1
 					if racer.nextCp == 1 then
 						racer.lap += 1
-						if racer.lap >= GameConfig.Race.laps then
+						if racer.lap >= track.lapCount then
 							-- 완주
 							racer.finished = true
 							racer.finishTime = os.clock() - startTime
@@ -694,38 +901,47 @@ function RaceManager.beginTracking()
 			RaceManager.broadcastProgress(track)
 		end
 
-		-- 남은 레이서가 모두 완주했거나 제한 시간 초과 시 종료
-		local anyRacer = false
-		local allFinished = true
+		-- 종료 조건은 "사람" 기준: 사람이 모두 완주했거나(봇은 기다리지 않음),
+		-- 사람이 한 명도 안 남았거나(전원 퇴장), 제한 시간 초과 시 종료.
+		-- (봇만 남은 경주를 raceTimeLimit까지 끌지 않도록 함)
+		local anyHuman = false
+		local allHumansFinished = true
 		for _, r in pairs(racers) do
-			anyRacer = true
-			if not r.finished then
-				allFinished = false
-				break
+			if not r.isBot then
+				anyHuman = true
+				if not r.finished then
+					allHumansFinished = false
+					break
+				end
 			end
 		end
 		local elapsed = os.clock() - startTime
-		if (anyRacer and allFinished) or elapsed >= GameConfig.Race.raceTimeLimit then
+		if not anyHuman or allHumansFinished or elapsed >= GameConfig.Race.raceTimeLimit then
 			RaceManager.endRace()
 		end
 	end)
 end
 
 function RaceManager.onRacerFinished(racer: RacerState)
+	-- 봇은 순위(place)만 차지하고 보상/기록/리더보드 제출은 없음
+	local player = racer.player
+	if racer.isBot or not player then
+		return
+	end
 	local place = racer.place or 0
 	local reward = GameConfig.Economy.rewardsByPlace[place] or GameConfig.Economy.finishReward
-	DataManager.addMoney(racer.player, reward)
-	DataManager.recordRace(racer.player, place == 1)
-	notify(racer.player, ("%d등! +%d 머니"):format(place, reward))
+	DataManager.addMoney(player, reward)
+	DataManager.recordRace(player, place == 1)
+	notify(player, ("%d등! +%d 머니"):format(place, reward))
 
 	-- 최고 기록 갱신 + 글로벌 순위표 제출
 	local time = racer.finishTime
 	if time and time > 0 then
-		local improved = DataManager.updateBestTime(racer.player, time)
+		local improved = DataManager.updateBestTime(player, time)
 		if improved then
-			notify(racer.player, ("🏆 개인 신기록! %.2f초"):format(time))
+			notify(player, ("🏆 개인 신기록! %.2f초"):format(time))
 		end
-		LeaderboardService.submit(racer.player.UserId, racer.player.DisplayName, time)
+		LeaderboardService.submit(player.UserId, player.DisplayName, time)
 	end
 end
 
@@ -742,14 +958,15 @@ function RaceManager.endRace()
 		raceConnection = nil
 	end
 
-	-- 완주 못한 레이서 처리(완주 보상 없음, 기록만)
+	-- 완주 못한 레이서 처리(완주 보상 없음, 사람만 기록)
 	local results = {}
 	for _, racer in pairs(racers) do
-		if not racer.finished then
+		if not racer.finished and racer.player then
 			DataManager.recordRace(racer.player, false)
 		end
 		table.insert(results, {
-			name = racer.player.DisplayName,
+			name = racer.name,
+			isBot = racer.isBot,
 			place = racer.place,
 			finished = racer.finished,
 			time = racer.finishTime,
@@ -767,6 +984,8 @@ function RaceManager.endRace()
 
 	-- 결과 표시 후 라운지 복귀
 	task.wait(5)
+	-- 테마 조명 → 라운지 기본 조명 복원(라운지로 돌아가기 전에 복원해 한 프레임도 테마 조명이 안 보이게)
+	restoreLighting()
 	RaceManager.returnAllToLounge()
 
 	-- 트랙/차량 정리
@@ -784,15 +1003,18 @@ end
 function RaceManager.returnAllToLounge()
 	local spawnCFrame = LoungeBuilder.getSpawnCFrame()
 	for _, racer in pairs(racers) do
-		local player = racer.player
 		if racer.car then
 			racer.car:Destroy()
 		end
-		local character = player.Character
-		if character and character:FindFirstChild("HumanoidRootPart") then
-			task.spawn(function()
-				character:PivotTo(spawnCFrame * CFrame.new(math.random(-15, 15), 0, math.random(-15, 15)))
-			end)
+		-- 봇은 캐릭터가 없으니 차량만 정리. 사람만 라운지로 순간이동.
+		local player = racer.player
+		if player then
+			local character = player.Character
+			if character and character:FindFirstChild("HumanoidRootPart") then
+				task.spawn(function()
+					character:PivotTo(spawnCFrame * CFrame.new(math.random(-15, 15), 0, math.random(-15, 15)))
+				end)
+			end
 		end
 	end
 end
@@ -811,6 +1033,8 @@ end
 
 function RaceManager.init()
 	Players.PlayerRemoving:Connect(RaceManager.onPlayerLeaving)
+	-- 라운지 기본 조명 스냅샷(테마 조명 적용 후 복원 기준값)
+	defaultLighting = captureLighting()
 	broadcastQueue()
 end
 

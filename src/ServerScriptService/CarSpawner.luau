@@ -450,6 +450,53 @@ function CarSpawner.build(carDef: any, custom: any?): Model
 	return model
 end
 
+-- 차 위 이름표(BillboardGui "CarName")의 텍스트를 운전자 이름으로 교체
+function CarSpawner.setNameTag(model: Model, text: string)
+	local seat = model.PrimaryPart
+	if not seat then
+		return
+	end
+	local gui = seat:FindFirstChild("CarName")
+	if not gui then
+		return
+	end
+	local label = gui:FindFirstChildWhichIsA("TextLabel", true)
+	if label then
+		(label :: TextLabel).Text = text
+	end
+end
+
+-- AI 봇 차량 스폰 (키네매틱: 앵커 + 충돌 없음, RaceManager가 경로를 따라 매 프레임 이동)
+function CarSpawner.spawnBot(spawnCFrame: CFrame, parent: Instance?, botName: string, bodyColor: { number }?): Model?
+	local botCfg = (GameConfig :: any).Bots
+	local carDef = GameConfig.CarsById[botCfg.carId] or GameConfig.CarsById[GameConfig.Economy.defaultCarId]
+	if not carDef then
+		return nil
+	end
+
+	local model = CarSpawner.build(carDef, { bodyColor = bodyColor })
+	model:PivotTo(spawnCFrame)
+
+	-- 봇은 물리 시뮬레이션 대신 서버가 CFrame으로 직접 이동시킨다.
+	-- PrimaryPart(시트)를 앵커하면 용접/Motor6D로 붙은 차체 전체가 함께 따라온다.
+	-- 모든 파트의 충돌을 꺼서 플레이어 차와 부딪히지 않게 한다(끼임/불공정 방지).
+	local seat = model.PrimaryPart :: VehicleSeat
+	seat.Anchored = true
+	seat.Disabled = true -- 플레이어가 봇 차에 우발적으로 탑승하지 못하게
+	for _, d in ipairs(model:GetDescendants()) do
+		if d:IsA("BasePart") then
+			(d :: BasePart).CanCollide = false
+		elseif d:IsA("Sound") then
+			d:Destroy() -- 봇 엔진음 제거(다수 봇의 소음 누적 방지)
+		end
+	end
+
+	CarSpawner.setNameTag(model, "🤖 " .. botName)
+	model:SetAttribute("IsBot", true)
+	model.Parent = parent or workspace
+	return model
+end
+
 -- 플레이어를 위해 차량을 스폰하고 탑승시킴
 function CarSpawner.spawnFor(player: Player, spawnCFrame: CFrame, parent: Instance?): Model?
 	local data = DataManager.get(player)
@@ -464,6 +511,8 @@ function CarSpawner.spawnFor(player: Player, spawnCFrame: CFrame, parent: Instan
 
 	local model = CarSpawner.build(carDef, custom)
 	model:PivotTo(spawnCFrame)
+	-- 이름표를 운전자(플레이어) 이름으로 표시 → 누가 누구인지 식별
+	CarSpawner.setNameTag(model, player.DisplayName)
 	model.Parent = parent or workspace
 
 	-- 캐릭터를 시트에 앉힘
