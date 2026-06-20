@@ -20,9 +20,13 @@ local DataManager = require(script.Parent.DataManager)
 local ShopService = require(script.Parent.ShopService)
 local RaceManager = require(script.Parent.RaceManager)
 local LeaderboardService = require(script.Parent.LeaderboardService)
+local CarSpawner = require(script.Parent.CarSpawner)
 
 -- 1) 라운지 생성
 LoungeBuilder.build()
+
+-- 1.5) 차고 UI 3D 미리보기용 차량 모델을 ReplicatedStorage에 준비(클라가 ViewportFrame에 복제)
+CarSpawner.setupPreviews()
 
 -- 2) 데이터 매니저
 DataManager.init()

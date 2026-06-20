@@ -293,13 +293,49 @@ local carList = make("ScrollingFrame", {
 	ScrollBarThickness = 6,
 }, garageFrame)
 local listLayout = make("UIGridLayout", {
-	CellSize = UDim2.new(0, 220, 0, 180),
+	CellSize = UDim2.new(0, 220, 0, 270),
 	CellPadding = UDim2.new(0, 10, 0, 10),
 	SortOrder = Enum.SortOrder.LayoutOrder,
 }, carList)
 
 -- 차량 카드 UI 보관 (갱신용)
 local carCards: { [string]: { update: () -> () } } = {}
+
+-- 서버가 ReplicatedStorage.CarPreviews에 준비한 3D 차량 모델(차고 미리보기용)
+local carPreviewsFolder: Instance? = ReplicatedStorage:WaitForChild("CarPreviews", 8)
+
+-- 카드 상단에 차량 3D 미리보기(ViewportFrame)를 만든다 → 어떤 차인지 한눈에 보이게.
+local function buildCarViewport(parent: Instance, carId: string)
+	local vp = make("ViewportFrame", {
+		Size = UDim2.new(1, -12, 0, 96),
+		Position = UDim2.new(0, 6, 0, 6),
+		BackgroundColor3 = Color3.fromRGB(16, 18, 26),
+		Ambient = Color3.fromRGB(175, 177, 185),
+		LightColor = Color3.fromRGB(255, 255, 255),
+		LightDirection = Vector3.new(-1, -1.4, -0.7),
+	}, parent)
+	corner(8, vp)
+
+	local src = carPreviewsFolder and carPreviewsFolder:FindFirstChild(carId)
+	if not src then
+		return -- 미리보기 모델이 아직 없으면 빈 화면만(크래시 방지)
+	end
+	local model = (src :: Instance):Clone()
+	model.Parent = vp
+
+	local cam = Instance.new("Camera")
+	cam.Parent = vp
+	vp.CurrentCamera = cam
+
+	local cf, size = (model :: Model):GetBoundingBox()
+	local center = cf.Position
+	local radius = math.max(size.X, size.Y, size.Z)
+	-- 전진=-Z. 앞·오른쪽·위에서 내려다보는 3/4 앵글로 차 실루엣이 잘 보이게.
+	local dir = Vector3.new(0.75, 0.5, -1).Unit
+	local dist = radius * 1.15 + 4
+	cam.FieldOfView = 55
+	cam.CFrame = CFrame.lookAt(center + dir * dist, center)
+end
 
 local function buildCarCard(carDef: any, order: number)
 	local tierInfo = GameConfig.Tiers[carDef.tier]
@@ -310,9 +346,12 @@ local function buildCarCard(carDef: any, order: number)
 	corner(10, card)
 	make("UIStroke", { Color = tierInfo.color, Thickness = 2, Transparency = 0.2 }, card)
 
+	-- 차량 3D 미리보기(상단)
+	buildCarViewport(card, carDef.id)
+
 	make("TextLabel", {
 		Size = UDim2.new(1, -12, 0, 24),
-		Position = UDim2.new(0, 6, 0, 6),
+		Position = UDim2.new(0, 6, 0, 108),
 		BackgroundTransparency = 1,
 		Text = carDef.displayName,
 		TextColor3 = Color3.fromRGB(255, 255, 255),
@@ -323,7 +362,7 @@ local function buildCarCard(carDef: any, order: number)
 
 	make("TextLabel", {
 		Size = UDim2.new(1, -12, 0, 18),
-		Position = UDim2.new(0, 6, 0, 32),
+		Position = UDim2.new(0, 6, 0, 134),
 		BackgroundTransparency = 1,
 		Text = "[" .. tierInfo.displayName .. "]",
 		TextColor3 = tierInfo.color,
@@ -336,7 +375,7 @@ local function buildCarCard(carDef: any, order: number)
 	local stats = carDef.stats
 	make("TextLabel", {
 		Size = UDim2.new(1, -12, 0, 54),
-		Position = UDim2.new(0, 6, 0, 52),
+		Position = UDim2.new(0, 6, 0, 154),
 		BackgroundTransparency = 1,
 		Text = ("최고속 %d\n가속 %d\n핸들링 %.0f%%"):format(stats.topSpeed, stats.accel, stats.handling * 100),
 		TextColor3 = Color3.fromRGB(200, 205, 215),
@@ -1518,7 +1557,41 @@ local function revealGarage()
 	customFrame.Visible = false
 end
 
-local function openGarageWithLoading()
+local function closeGarage()
+	garageFrame.Visible = false
+	customizeOpenBtn.Visible = false
+	customFrame.Visible = false
+end
+
+-- 발판으로 연 차고를 "발판에서 벗어나면 자동으로 닫기" 위한 감시.
+-- (차고 버튼으로 연 경우엔 감시하지 않아 멀리서도 계속 볼 수 있다.)
+local garageProximityToken = 0
+local function watchPadProximity()
+	local lounge = workspace:FindFirstChild("Lounge")
+	local pad = lounge and lounge:FindFirstChild("CarSelectPad")
+	if not pad then
+		return
+	end
+	garageProximityToken += 1
+	local myToken = garageProximityToken
+	task.spawn(function()
+		while garageFrame.Visible and myToken == garageProximityToken do
+			local char = player.Character
+			local hrp = char and char:FindFirstChild("HumanoidRootPart")
+			if hrp then
+				local d = (hrp :: BasePart).Position - (pad :: BasePart).Position
+				-- 발판은 20x20. 수평거리 18studs 넘게 벗어나면 닫는다(점프/높이는 무시).
+				if Vector2.new(d.X, d.Z).Magnitude > 18 then
+					closeGarage()
+					break
+				end
+			end
+			task.wait(0.25)
+		end
+	end)
+end
+
+local function openGarageWithLoading(fromPad: boolean?)
 	if garageFrame.Visible then
 		return -- 이미 열려 있으면 무시
 	end
@@ -1527,21 +1600,20 @@ local function openGarageWithLoading()
 	revealGarage()
 	showLoading("🚗 차고지 준비 중...", "차량 정보를 불러오고 있어요")
 	task.delay(0.5, hideLoading)
+	if fromPad then
+		watchPadProximity() -- 발판으로 열었을 때만: 발판에서 벗어나면 자동 닫힘
+	end
 end
 
 garageBtn.Activated:Connect(function()
 	if garageFrame.Visible then
-		-- 닫기
-		garageFrame.Visible = false
-		customizeOpenBtn.Visible = false
-		customFrame.Visible = false
+		closeGarage()
 	else
-		openGarageWithLoading()
+		openGarageWithLoading() -- 버튼으로 열면 자동닫힘 없음(멀리서도 사용 가능)
 	end
 end)
 garageClose.Activated:Connect(function()
-	garageFrame.Visible = false
-	customizeOpenBtn.Visible = false
+	closeGarage()
 end)
 
 local function setQueueButton(joined: boolean)
@@ -1702,9 +1774,10 @@ Remotes.Event("LeaderboardUpdated").OnClientEvent:Connect(function(top)
 	end
 end)
 
--- 차량 선택 패드 진입 → 서버 신호로 차고 UI 열기 (차고 버튼과 동일 동작, 로딩 포함)
+-- 차량 선택 패드 진입 → 서버 신호로 차고 UI 열기. 발판으로 열었으므로 발판에서
+-- 벗어나면 자동으로 닫히도록 fromPad=true 로 연다.
 Remotes.Event("OpenGarageUI").OnClientEvent:Connect(function()
-	openGarageWithLoading()
+	openGarageWithLoading(true)
 end)
 
 -- =====================================================================

@@ -13,6 +13,7 @@
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ContextActionService = game:GetService("ContextActionService")
 
 local GameConfig = require(ReplicatedStorage.GameConfig)
 
@@ -26,6 +27,7 @@ local currentSpeed = 0 -- 현재 전진 속도(음수 = 후진)
 -- 캐릭터를 소유한 클라이언트에서 Jumping 상태 자체를 비활성화한다.
 -- 하차(정상) 시 원래 점프 능력으로 복구한다.
 local jumpGuard: { humanoid: Humanoid, power: number, height: number }? = nil
+local JUMP_ACTION = "RaceNoJump" -- ContextActionService 액션 이름(점프 입력 가로채기)
 
 local function disableJumpFor(humanoid: Humanoid)
 	if jumpGuard and jumpGuard.humanoid == humanoid then
@@ -35,6 +37,11 @@ local function disableJumpFor(humanoid: Humanoid)
 	humanoid:SetStateEnabled(Enum.HumanoidStateType.Jumping, false)
 	humanoid.JumpPower = 0
 	humanoid.JumpHeight = 0
+	-- 가장 확실한 차단: 점프 입력(스페이스/터치 점프버튼/게임패드 A)을 액션 레벨에서 흡수(Sink)해
+	-- Humanoid에 점프 요청 자체가 도달하지 않게 한다 → 차에서 튕겨나가지 않음.
+	ContextActionService:BindAction(JUMP_ACTION, function()
+		return Enum.ContextActionResult.Sink
+	end, false, Enum.PlayerActions.CharacterJump)
 end
 
 local function restoreJump()
@@ -47,6 +54,7 @@ local function restoreJump()
 		g.humanoid.JumpPower = g.power
 		g.humanoid.JumpHeight = g.height
 	end
+	ContextActionService:UnbindAction(JUMP_ACTION)
 	jumpGuard = nil
 end
 
@@ -197,10 +205,20 @@ RunService.Heartbeat:Connect(function(dt: number)
 	-- 탑승 중에는 매 프레임 점프 잠금을 재확인(다른 스크립트/리스폰이 풀어도 유지)
 	if jumpGuard then
 		jumpGuard.humanoid:SetStateEnabled(Enum.HumanoidStateType.Jumping, false)
+		jumpGuard.humanoid.Jump = false -- 점프 요청 플래그가 서면 즉시 끔(이중 안전장치)
 	end
-	-- 출발 카운트다운 중에는 차량이 고정(Anchored)됨
-	if seat.Anchored then
+	-- 출발 카운트다운 중에는 차량이 동결됨.
+	-- ⚠️ 앵커(Anchored)로 동결하면 네트워크 소유권이 서버로 넘어가버려서, GO 후에도
+	--    클라이언트 조작이 차에 반영되지 않는 버그가 있었다(=내렸다 다시 타야 움직임).
+	--    그래서 앵커 대신 RaceFrozen 속성으로 동결한다 → 소유권은 운전자에게 유지되고,
+	--    클라이언트가 직접 속도를 0으로 눌러 제자리를 지킨다 → GO 즉시 방향키로 출발 가능.
+	if seat.Anchored or seat:GetAttribute("RaceFrozen") then
 		currentSpeed = 0
+		if not seat.Anchored then
+			local vy = seat.AssemblyLinearVelocity.Y -- 중력(수직)은 보존해 지면에 안착
+			seat.AssemblyLinearVelocity = Vector3.new(0, vy, 0)
+			seat.AssemblyAngularVelocity = Vector3.zero
+		end
 		updateEngineSound(seat, 0, false)
 		return
 	end

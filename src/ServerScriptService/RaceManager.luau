@@ -349,6 +349,10 @@ function RaceManager.startRace()
 	if botCfg and botCfg.enabled then
 		local route = track.minimapPath
 		local need = GameConfig.Race.maxPlayers - #participants
+		local spawnedBots = 0
+		if not route or #route < 2 then
+			warn(("[RaceManager] 봇 경로(minimapPath)가 비어 있어 봇을 못 만듭니다 (#route=%d)"):format(route and #route or 0))
+		end
 		for j = 1, need do
 			local botName = botCfg.names[((j - 1) % #botCfg.names) + 1]
 			local bodyColor = botCfg.bodyColors[((j - 1) % #botCfg.bodyColors) + 1]
@@ -357,6 +361,11 @@ function RaceManager.startRace()
 			local routePos = 1 - j * 0.7
 			local botUserId = -(1000 + j) -- 실제 UserId와 충돌하지 않는 음수 키
 			local car = CarSpawner.spawnBot(botCFrameAt(route, routePos, laneOffset), trackFolder, botName, bodyColor)
+			if car then
+				spawnedBots += 1
+			else
+				warn(("[RaceManager] 봇 '%s' 차량 생성 실패(spawnBot이 nil 반환)"):format(botName))
+			end
 			racers[botUserId] = {
 				player = nil,
 				isBot = true,
@@ -373,6 +382,7 @@ function RaceManager.startRace()
 				laneOffset = laneOffset,
 			}
 		end
+		print(("[RaceManager] AI 봇 %d/%d대 생성 (사람 %d명, maxPlayers=%d)"):format(spawnedBots, need, #participants, GameConfig.Race.maxPlayers))
 	end
 
 	-- 부스트 패드 / 오일 슬릭 상호작용 연결
@@ -425,13 +435,15 @@ function RaceManager.freezeCars(frozen: boolean)
 		local car = racer.car
 		if car and car.PrimaryPart then
 			local seat = car.PrimaryPart
-			seat.Anchored = frozen
-			-- ⚠️ 출발 직후 차가 안 움직이던 버그 수정:
-			-- 스폰 시 deferred SetNetworkOwner가 freezeCars(true)의 Anchored=true 이후 실행돼
-			-- 실패(앵커된 파트는 소유권 지정 불가)하면서 서버가 소유권을 계속 쥔다.
-			-- 고정 해제(frozen=false) 시 시트 소유권을 플레이어에게 다시 넘겨
-			-- 클라이언트 입력이 차량에 반영되게 한다(내렸다 다시 타지 않아도 움직임).
-			if not frozen then
+			-- ⚠️ 출발 직후 "내렸다 다시 타야 움직이던" 버그의 근본 수정:
+			-- 예전엔 seat.Anchored=true 로 동결했는데, 앵커된 파트는 네트워크 소유권을
+			-- 가질 수 없어 운전자에게 줬던 소유권이 박탈되고, 앵커 해제 후에도 서버가 계속
+			-- 소유권을 쥐어 클라이언트 조작이 반영되지 않았다(재탑승해야 소유권 자동 재부여).
+			-- → 앵커 대신 RaceFrozen 속성으로 동결한다. 소유권은 운전자에게 그대로 유지되고,
+			--   클라이언트(CarController)가 속성을 보고 제자리를 지키다 GO 즉시 출발한다.
+			seat:SetAttribute("RaceFrozen", frozen)
+			-- 소유권을 운전자에게 확실히(앵커를 안 쓰므로 이 호출이 성공한다).
+			if racer.player then
 				pcall(function()
 					seat:SetNetworkOwner(racer.player)
 				end)

@@ -515,7 +515,9 @@ function CarSpawner.spawnFor(player: Player, spawnCFrame: CFrame, parent: Instan
 	CarSpawner.setNameTag(model, player.DisplayName)
 	model.Parent = parent or workspace
 
-	-- 캐릭터를 시트에 앉힘
+	-- 캐릭터를 시트에 앉히고, 그 직후 네트워크 소유권을 운전자에게 넘긴다.
+	-- (착석 → 소유권 순서를 한 블록에서 보장해야 클라이언트 조작이 처음부터 반영된다.
+	--  동결도 앵커가 아닌 RaceFrozen 속성으로 하므로 이 소유권은 카운트다운 내내 유지된다.)
 	local character = player.Character
 	local seat = model.PrimaryPart :: VehicleSeat
 	if character then
@@ -523,19 +525,41 @@ function CarSpawner.spawnFor(player: Player, spawnCFrame: CFrame, parent: Instan
 		if humanoid then
 			task.defer(function()
 				seat:Sit(humanoid)
+				pcall(function()
+					seat:SetNetworkOwner(player)
+				end)
 			end)
 		end
 	end
 
-	-- 네트워크 소유권을 운전자에게 (아케이드 조작 반응성)
-	task.defer(function()
-		pcall(function()
-			seat:SetNetworkOwner(player)
-		end)
-	end)
-
 	model:SetAttribute("OwnerUserId", player.UserId)
 	return model
+end
+
+-- 차고 UI의 3D 미리보기용: 각 차량을 한 번씩 빌드해 ReplicatedStorage.CarPreviews 에 보관한다.
+-- 클라이언트가 ViewportFrame에 이 모델을 복제해 실제 차 외형을 보여준다.
+-- 정적 표시용이므로 모든 파트를 앵커하고 충돌/사운드/이름표를 제거한다.
+function CarSpawner.setupPreviews()
+	local existing = ReplicatedStorage:FindFirstChild("CarPreviews")
+	if existing then
+		existing:Destroy()
+	end
+	local folder = Instance.new("Folder")
+	folder.Name = "CarPreviews"
+	for _, carDef in ipairs(GameConfig.Cars) do
+		local m = CarSpawner.build(carDef)
+		m.Name = carDef.id
+		for _, d in ipairs(m:GetDescendants()) do
+			if d:IsA("BasePart") then
+				(d :: BasePart).Anchored = true
+				;(d :: BasePart).CanCollide = false
+			elseif d:IsA("Sound") or d:IsA("BillboardGui") then
+				d:Destroy()
+			end
+		end
+		m.Parent = folder
+	end
+	folder.Parent = ReplicatedStorage
 end
 
 return CarSpawner
