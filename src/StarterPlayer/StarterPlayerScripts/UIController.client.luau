@@ -1360,7 +1360,8 @@ RunService.RenderStepped:Connect(function()
 end)
 
 -- =====================================================================
--- 아이템 슬롯 HUD (박스 획득 → [Q]/버튼으로 사용)
+-- 아이템 슬롯 HUD (박스 획득 → [Q]/버튼으로 사용, 최대 2칸 FIFO)
+--   슬롯1 = 다음에 사용할 아이템([Q]/버튼), 슬롯2 = 예비 아이템
 -- =====================================================================
 local ITEM_INFO: { [string]: { emoji: string, name: string, color: Color3 } } = {
 	banana   = { emoji = "🍌", name = "바나나",  color = Color3.fromRGB(255, 230, 70) },
@@ -1372,60 +1373,115 @@ local ITEM_INFO: { [string]: { emoji: string, name: string, color: Color3 } } = 
 	shield    = { emoji = "🛡️", name = "방어막",  color = Color3.fromRGB(120, 200, 255) },
 	lightning = { emoji = "⚡", name = "번개",    color = Color3.fromRGB(255, 230, 90)  },
 }
-local currentItem: string? = nil
+-- FIFO 인벤토리: 서버가 보내는 배열을 그대로 유지 (최대 2개)
+local currentItems: { string } = {}
 
-local itemSlot = make("Frame", {
-	Size = UDim2.new(0, 132, 0, 132),
-	Position = UDim2.new(1, -148, 1, -148),
-	BackgroundColor3 = Color3.fromRGB(20, 24, 34),
-	BackgroundTransparency = 0.1,
+-- 두 슬롯 + 사용 버튼을 담는 컨테이너 (우하단)
+local itemContainer = make("Frame", {
+	Size = UDim2.new(0, 280, 0, 144),
+	Position = UDim2.new(1, -296, 1, -160),
+	BackgroundTransparency = 1,
 	Visible = false,
 }, gui)
-corner(16, itemSlot)
-local itemStroke = make("UIStroke", { Color = Color3.fromRGB(120, 130, 150), Thickness = 3 }, itemSlot)
-local itemEmoji = make("TextLabel", {
-	Size = UDim2.new(1, 0, 0, 66),
-	Position = UDim2.new(0, 0, 0, 8),
+
+-- 슬롯 1개 생성 헬퍼 (xPos = 컨테이너 기준 좌측 오프셋). 라벨/테두리 핸들 반환.
+local function makeItemSlot(xPos: number)
+	local slot = make("Frame", {
+		Size = UDim2.new(0, 130, 0, 106),
+		Position = UDim2.new(0, xPos, 0, 0),
+		BackgroundColor3 = Color3.fromRGB(20, 24, 34),
+		BackgroundTransparency = 0.1,
+	}, itemContainer)
+	corner(14, slot)
+	local stroke = make("UIStroke", { Color = Color3.fromRGB(120, 130, 150), Thickness = 3 }, slot)
+	local emojiLbl = make("TextLabel", {
+		Size = UDim2.new(1, 0, 0, 60),
+		Position = UDim2.new(0, 0, 0, 6),
+		BackgroundTransparency = 1,
+		Text = "—",
+		TextScaled = true,
+		Font = Enum.Font.GothamBold,
+		TextTransparency = 0.65,
+	}, slot)
+	local nameLbl = make("TextLabel", {
+		Size = UDim2.new(1, 0, 0, 18),
+		Position = UDim2.new(0, 0, 0, 66),
+		BackgroundTransparency = 1,
+		Text = "",
+		TextColor3 = Color3.fromRGB(240, 245, 255),
+		Font = Enum.Font.GothamBold,
+		TextScaled = true,
+		TextTransparency = 1,
+	}, slot)
+	return slot, emojiLbl, nameLbl, stroke
+end
+
+-- 슬롯1(앞: [Q]로 사용) + 슬롯2(예비, 12px 간격)
+local slot1Frame, slot1Emoji, slot1Name, slot1Stroke = makeItemSlot(0)
+local slot2Frame, slot2Emoji, slot2Name, slot2Stroke = makeItemSlot(142)
+-- 슬롯1 좌상단 "[Q]" 힌트
+make("TextLabel", {
+	Size = UDim2.new(0, 36, 0, 16),
+	Position = UDim2.new(0, 6, 1, -22),
 	BackgroundTransparency = 1,
-	Text = "",
-	TextScaled = true,
-	Font = Enum.Font.GothamBold,
-}, itemSlot)
-local itemName = make("TextLabel", {
-	Size = UDim2.new(1, 0, 0, 20),
-	Position = UDim2.new(0, 0, 0, 72),
-	BackgroundTransparency = 1,
-	Text = "",
-	TextColor3 = Color3.fromRGB(240, 245, 255),
+	Text = "[Q]",
+	TextColor3 = Color3.fromRGB(190, 200, 220),
 	Font = Enum.Font.GothamBold,
 	TextScaled = true,
-}, itemSlot)
+	TextXAlignment = Enum.TextXAlignment.Left,
+	TextTransparency = 0.25,
+}, slot1Frame)
+
+-- 사용 버튼: 컨테이너 하단 전체 너비 (Q키와 동일 — 슬롯1 아이템 소모)
 local itemUseBtn = make("TextButton", {
-	Size = UDim2.new(1, -16, 0, 26),
-	Position = UDim2.new(0, 8, 1, -32),
+	Size = UDim2.new(0, 280, 0, 30),
+	Position = UDim2.new(0, 0, 1, -32),
 	BackgroundColor3 = Color3.fromRGB(70, 170, 90),
 	Text = "사용 [Q]",
 	TextColor3 = Color3.fromRGB(255, 255, 255),
 	Font = Enum.Font.GothamBold,
 	TextScaled = true,
 	AutoButtonColor = true,
-}, itemSlot)
+}, itemContainer)
 corner(8, itemUseBtn)
 
-local function refreshItemSlot()
-	local info = currentItem and ITEM_INFO[currentItem]
+-- 슬롯 1개 시각 갱신: 아이템 있으면 lit, 없으면 dimmed
+local function applySlotVisual(frame: any, emojiLbl: any, nameLbl: any, stroke: any, itemId: string?)
+	local info = itemId and ITEM_INFO[itemId]
 	if info then
-		itemSlot.Visible = true
-		itemEmoji.Text = info.emoji
-		itemName.Text = info.name
-		itemStroke.Color = info.color
+		frame.BackgroundColor3 = Color3.fromRGB(20, 24, 34)
+		frame.BackgroundTransparency = 0.1
+		stroke.Color = info.color
+		stroke.Thickness = 3
+		emojiLbl.Text = info.emoji
+		emojiLbl.TextTransparency = 0
+		nameLbl.Text = info.name
+		nameLbl.TextTransparency = 0
 	else
-		itemSlot.Visible = false
+		-- 빈 슬롯: 어둡게
+		frame.BackgroundColor3 = Color3.fromRGB(15, 17, 24)
+		frame.BackgroundTransparency = 0.5
+		stroke.Color = Color3.fromRGB(70, 78, 95)
+		stroke.Thickness = 2
+		emojiLbl.Text = "—"
+		emojiLbl.TextTransparency = 0.65
+		nameLbl.Text = ""
+		nameLbl.TextTransparency = 1
 	end
 end
 
+local function refreshItemSlots()
+	local item1: string? = if #currentItems >= 1 then currentItems[1] else nil
+	local item2: string? = if #currentItems >= 2 then currentItems[2] else nil
+	-- 아이템이 하나라도 있을 때만 컨테이너 표시(두 번째 슬롯은 비어 있으면 dimmed)
+	itemContainer.Visible = item1 ~= nil or item2 ~= nil
+	applySlotVisual(slot1Frame, slot1Emoji, slot1Name, slot1Stroke, item1)
+	applySlotVisual(slot2Frame, slot2Emoji, slot2Name, slot2Stroke, item2)
+end
+
+-- [Q] / 버튼: 슬롯1(FIFO 맨 앞) 아이템 사용 요청
 local function tryUseItem()
-	if currentItem then
+	if #currentItems > 0 then
 		Remotes.Event("RequestUseItem"):FireServer()
 	end
 end
@@ -1441,14 +1497,15 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 	end
 end)
 
--- 보유 아이템 변경 수신
-Remotes.Event("ItemUpdated").OnClientEvent:Connect(function(itemId)
-	if itemId == "none" or itemId == nil then
-		currentItem = nil
+-- 보유 아이템 변경 수신: 서버가 현재 인벤토리 배열 전체를 보냄
+-- 예: {} (없음) / {"banana"} (1개) / {"banana","rocket"} (2개)
+Remotes.Event("ItemUpdated").OnClientEvent:Connect(function(items)
+	if type(items) == "table" then
+		currentItems = items
 	else
-		currentItem = itemId
+		currentItems = {}
 	end
-	refreshItemSlot()
+	refreshItemSlots()
 end)
 
 -- 아이템 발동 연출 훅(현재는 statusIndicator + 서버 스폰 파트로 처리)
@@ -1713,8 +1770,8 @@ Remotes.Event("RaceStateChanged").OnClientEvent:Connect(function(info)
 		lbFrame.Visible = false
 		queueStatus.Visible = false
 		-- 새 경주 시작: 아이템 슬롯 초기화
-		currentItem = nil
-		refreshItemSlot()
+		currentItems = {}
+		refreshItemSlots()
 	else
 		-- 라운지 복귀: 버튼 복원 + HUD 정리
 		setLobbyButtonsVisible(true)
@@ -1725,8 +1782,8 @@ Remotes.Event("RaceStateChanged").OnClientEvent:Connect(function(info)
 		rankHud.Visible = false
 		podium.Visible = false
 		statusIndicator.Visible = false
-		currentItem = nil
-		refreshItemSlot()
+		currentItems = {}
+		refreshItemSlots()
 		clearMinimap()
 		hideCeremony() -- [계약 F] Idle 복귀 시 시상대 Ceremony UI 숨김
 	end

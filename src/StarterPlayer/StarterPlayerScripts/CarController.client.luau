@@ -93,6 +93,20 @@ local wasFrozen = false -- 직전 프레임에 출발 동결 상태였는가(GO 
 local throttlePressStart: number? = nil -- 카운트다운 중 가속을 시작한 시각(로켓 스타트 판정)
 local lastCollisionPos: Vector3? = nil -- 충돌 감지용 직전 위치
 local lastCollisionAt = 0 -- 충돌 디바운스용 시각(os.clock)
+local freezeStartY: number? = nil -- 물풍선 동결 첫 프레임의 차량 Y 좌표(공중 부양 기준점)
+
+-- 조향 입력 지수 평활: 키보드 이진 신호(-1/0/1)를 부드럽게 완화.
+-- 1/STEER_SMOOTH_K ≈ 반응 시간 상수(초). 12 → 약 83 ms.
+-- 드리프트 판정/게이지 충전은 raw steer(이진)로 유지 → 응답성 보장.
+local smoothedSteer = 0
+local STEER_SMOOTH_K = 12
+
+-- 드리프트 종료 그립 전환: 즉각 moveDir 스냅 방지용
+local gripFrom = Vector3.new(0, 0, -1) -- 드리프트 종료 시점의 moveDir
+local gripBlend = 0                     -- 1→0: 이 값이 >0이면 gripFrom→heading 보간 중(약 0.1초)
+
+-- 충돌 감속 타이머: 즉각 *=0.4 대신 지수 감쇠
+local collisionDampUntil = 0 -- 이 시각까지 exp(-18*dt) 감쇠 적용(os.clock)
 
 -- 키보드 입력을 직접 읽는다(throttle, steer 각각 -1/0/1).
 -- ⚠️ 서버가 강제로 착석(seat:Sit)시키면 클라이언트의 VehicleSeat 입력 캡처가
@@ -130,6 +144,8 @@ end
 local function resetDrift(seat: VehicleSeat?)
 	drifting = false
 	nitroCharge = 0
+	gripBlend = 0        -- 특수 상태(얼음/바나나 등) 진입 시 그립 전환 즉시 취소
+	collisionDampUntil = 0 -- 특수 상태 진입 시 충돌 감쇠 잔류 제거
 	if seat then
 		seat:SetAttribute("Drifting", false)
 		seat:SetAttribute("NitroCharge", 0)
@@ -158,7 +174,11 @@ local function unbindDrift()
 end
 
 -- 엔진 사운드: 속도에 비례해 피치/볼륨을 조절해 RPM 느낌을 낸다
-local function updateEngineSound(seat: VehicleSeat, speedRatio: number, boosting: boolean)
+-- ⚠️ 이전 구현은 follow(0.2/0.45)를 dt 없이 곱해 프레임레이트 의존적이었다.
+--    1-exp(-k*dt) 공식으로 교체. k값은 60fps 기준 원래 follow에서 역산:
+--      일반(0.2/frame @60fps): k = -60*ln(1-0.2) ≈ 13.4/s
+--      부스트(0.45/frame @60fps): k = -60*ln(1-0.45) ≈ 35.9/s
+local function updateEngineSound(seat: VehicleSeat, speedRatio: number, boosting: boolean, dt: number)
 	local engine = seat:FindFirstChild("Engine")
 	if not engine or not engine:IsA("Sound") then
 		return
@@ -167,14 +187,15 @@ local function updateEngineSound(seat: VehicleSeat, speedRatio: number, boosting
 	local pitch = cfg.idlePlaybackSpeed + (cfg.maxPlaybackSpeed - cfg.idlePlaybackSpeed) * speedRatio
 	local volume = cfg.idleVolume + (cfg.maxVolume - cfg.idleVolume) * speedRatio
 	-- 부스트 순간 엔진음 극대화: 피치를 더 끌어올리고 볼륨을 최대로(굉음) + 빠르게 추종.
-	local follow = 0.2
+	local followK = 13.4 -- 1/s (일반)
 	if boosting then
 		pitch += cfg.boostPitchBonus * 1.6
 		volume = math.max(volume, cfg.maxVolume) * 1.15
-		follow = 0.45 -- 부스트 시 더 즉각적으로 치고 올라오게
+		followK = 35.9 -- 1/s (부스트: 더 즉각적으로)
 	end
-	engine.PlaybackSpeed += (pitch - engine.PlaybackSpeed) * follow
-	engine.Volume += (volume - engine.Volume) * follow
+	local followRate = 1 - math.exp(-followK * dt)
+	engine.PlaybackSpeed += (pitch - engine.PlaybackSpeed) * followRate
+	engine.Volume += (volume - engine.Volume) * followRate
 end
 
 -- 엔진 사운드 자동 선택: 후보 id를 순회하며 "실제로 로드되는 첫 id"를 고른다.
@@ -254,7 +275,9 @@ local function updateWheels(steer: number, dt: number)
 		return
 	end
 	local targetSteer = -steer * MAX_STEER -- 조향 방향을 차체 회전과 일치
-	steerVisual = lerp(steerVisual, targetSteer, math.clamp(dt * 9, 0, 1))
+	-- steer(=smoothedSteer)가 이미 평활됐으므로 추가 lerp 불필요.
+	-- 이중 평활하면 바퀴 비주얼이 차체 회전보다 눈에 띄게 느려짐.
+	steerVisual = targetSteer
 	-- 전진(currentSpeed>0) 시 바퀴가 앞으로 구르도록 누적
 	wheelSpin -= (currentSpeed * dt) / math.max(wheelRadius, 0.1)
 	if wheelSpin > math.pi * 2 or wheelSpin < -math.pi * 2 then
@@ -273,7 +296,12 @@ local function updateWheels(steer: number, dt: number)
 	end
 end
 
-RunService.Heartbeat:Connect(function(dt: number)
+-- ⚠️ Stepped(물리 스텝 이전)에서 속도를 쓴다.
+-- Heartbeat는 물리 스텝 이후에 발화하므로, 거기서 AssemblyLinearVelocity를 쓰면
+-- 해당 값이 다음 프레임 물리에야 반영된다(1프레임 래그 → 뚝뚝 끊김).
+-- Stepped에서 쓰면 같은 프레임 물리 스텝이 바로 읽어 위치를 계산 → 즉각 반영.
+-- Stepped 콜백 시그니처: (elapsedTime: number, dt: number)
+RunService.Stepped:Connect(function(_t: number, dt: number)
 	-- 매 프레임 활성 시트 갱신
 	local seat = findCarSeat()
 	if seat ~= activeSeat then
@@ -287,12 +315,14 @@ RunService.Heartbeat:Connect(function(dt: number)
 		if seat then
 			ensureEngineSound(seat) -- 새 차량 탑승 시 동작하는 엔진 사운드 선택
 			cacheWheels(seat) -- 바퀴 Motor6D 캐시
-			-- 드리프트/니트로 상태 초기화
+			-- 드리프트/니트로/동결 상태 초기화
 			moveDir = flatLook(seat)
 			wasFrozen = false
 			throttlePressStart = nil
 			lastCollisionPos = nil
+			freezeStartY = nil -- 물풍선 부양 기준점 초기화(차 바꾸면 재계산)
 			resetDrift(seat)
+			smoothedSteer = 0 -- 착석 시 조향 평활 초기화(직전 차의 평활값 잔류 방지)
 			bindDrift() -- 핸드브레이크(Shift/모바일 버튼) 입력 활성화
 			-- 탑승 즉시 점프 잠금(점프로 차에서 내려지는 것 방지)
 			local character = player.Character
@@ -317,6 +347,9 @@ RunService.Heartbeat:Connect(function(dt: number)
 	local kThrottle, kSteer = readKeyboard()
 	local throttle = kThrottle ~= 0 and kThrottle or seat.ThrottleFloat -- 전/후진(-1~1)
 	local steer = kSteer ~= 0 and kSteer or seat.SteerFloat -- 좌/우(-1~1)
+	-- 이진 입력(-1/0/1)을 지수 평활 → AssemblyAngularVelocity가 프레임마다 뚝 끊기지 않게.
+	-- raw steer는 드리프트 판정(canDrift)·게이지 충전에 계속 사용(이진 반응성 유지).
+	smoothedSteer = smoothedSteer + (steer - smoothedSteer) * (1 - math.exp(-STEER_SMOOTH_K * dt))
 	-- 출발 카운트다운 중에는 차량이 동결됨.
 	-- ⚠️ 앵커(Anchored)로 동결하면 네트워크 소유권이 서버로 넘어가버려서, GO 후에도
 	--    클라이언트 조작이 차에 반영되지 않는 버그가 있었다(=내렸다 다시 타야 움직임).
@@ -341,7 +374,7 @@ RunService.Heartbeat:Connect(function(dt: number)
 		wasFrozen = true
 		moveDir = flatLook(seat) -- 동결 중엔 진행방향을 차머리에 고정(출발 시 깔끔)
 		resetDrift(seat)
-		updateEngineSound(seat, 0, false)
+		updateEngineSound(seat, 0, false, dt)
 		-- 동결 중엔 자가복구 측정을 멈추고 창을 리셋(GO 직후부터 새로 측정)
 		lastStuckPos = nil
 		stuckTime = 0
@@ -364,22 +397,38 @@ RunService.Heartbeat:Connect(function(dt: number)
 	local shieldEnd = seat:GetAttribute("ShieldEndTime") :: number?       -- 방어막 아이템
 	local shielded = shieldEnd ~= nil and now < shieldEnd                 -- 방어막 활성 여부
 
-	-- 물풍선에 맞음: 완전히 갇힘(정지 + 입력 무시) — 방어막 중 무력화
+	-- 물풍선에 맞음: 공중 부양 + 느린 스핀으로 갇힘(입력 무시) — 방어막 중 무력화
+	-- ⚠️ Anchored 금지: 앵커하면 네트워크 소유권이 서버로 이전돼 해제 후에도 조작 불능.
+	--    대신 AssemblyLinearVelocity를 매 프레임 P-제어로 덮어써 중력을 상쇄하며 부양한다.
 	if not shielded and freezeEnd ~= nil and now < freezeEnd then
 		currentSpeed = 0
-		local vy = seat.AssemblyLinearVelocity.Y
-		seat.AssemblyLinearVelocity = Vector3.new(0, vy, 0)
-		seat.AssemblyAngularVelocity = Vector3.zero
+		-- 첫 프레임: 부양 기준 Y 좌표 캡처 (도로 높이, 이후 변하지 않음)
+		if freezeStartY == nil then
+			freezeStartY = seat.Position.Y
+		end
+		local balloonCfg = (GameConfig.Items :: any).balloon
+		local floatH: number = (balloonCfg.floatHeight :: number?) or 18
+		local targetY = (freezeStartY :: number) + floatH
+		-- P 제어: 오차 * Kp → 목표 Y 속도 (Kp=8, 최대 38 studs/s).
+		-- 매 프레임 AssemblyLinearVelocity를 덮어쓰므로 프레임레이트와 무관하게 안정 수렴.
+		local yError = targetY - seat.Position.Y
+		local yVel = math.clamp(yError * 8, -38, 38)
+		seat.AssemblyLinearVelocity = Vector3.new(0, yVel, 0) -- XZ 고정, Y만 P 제어
+		seat.AssemblyAngularVelocity = Vector3.new(0, 1.8, 0) -- 느린 Y축 스핀 (~0.3회/초)
 		updateWheels(0, dt)
 		resetDrift(seat)
-		moveDir = flatLook(seat)
-		updateEngineSound(seat, 0, false)
+		moveDir = flatLook(seat) -- 스핀에 따라 진행방향도 회전 → 해제 후 카오스 효과
+		updateEngineSound(seat, 0, false, dt)
 		return
+	end
+	-- 동결 해제 시 기준 Y 초기화 (다음 번 물풍선을 위해)
+	if freezeStartY ~= nil then
+		freezeStartY = nil
 	end
 
 	-- 바나나를 밟음: 빙글빙글 미끄러짐(주행/조향 불가) — 방어막 중 무력화
 	if not shielded and spinEnd ~= nil and now < spinEnd then
-		currentSpeed = lerp(currentSpeed, 0, math.clamp(dt * 2.5, 0, 1))
+		currentSpeed = lerp(currentSpeed, 0, 1 - math.exp(-2.5 * dt))
 		local cf = seat.CFrame
 		local horizontal = Vector3.new(cf.LookVector.X, 0, cf.LookVector.Z)
 		if horizontal.Magnitude > 0 then
@@ -391,7 +440,7 @@ RunService.Heartbeat:Connect(function(dt: number)
 		updateWheels(1, dt)
 		resetDrift(seat)
 		moveDir = flatLook(seat)
-		updateEngineSound(seat, 0.2, false)
+		updateEngineSound(seat, 0.2, false, dt)
 		return
 	end
 
@@ -450,13 +499,21 @@ RunService.Heartbeat:Connect(function(dt: number)
 		target = 0 -- 입력 없으면 천천히 멈춤
 	end
 
+	-- 충돌 감쇠: 충돌 직후 0.05초 동안 exp(-18*dt) 항력 적용.
+	-- 3~4 프레임에 걸쳐 원래 *0.4 수준(exp(-18×0.05)≈0.41)으로 부드럽게 감속.
+	-- 일반 가속 lerp보다 먼저 적용해야 감쇠가 목표 추종을 압도한다.
+	if os.clock() < collisionDampUntil then
+		currentSpeed *= math.exp(-18 * dt)
+	end
+
 	-- 가속/감속 비율 (가속 스탯과 dt 반영)
-	local rate = math.clamp(accel * dt * 0.12, 0, 1)
+	-- 1-exp(-k*dt) 지수 감쇠: 프레임레이트에 무관하게 동일한 체감 가속도.
+	local rate = 1 - math.exp(-accel * 0.12 * dt)
 	if target == 0 then
-		rate = math.clamp(dt * 1.5, 0, 1) -- 관성에 의한 감속
+		rate = 1 - math.exp(-1.5 * dt) -- 관성에 의한 감속
 	end
 	currentSpeed = lerp(currentSpeed, target, rate)
-	if math.abs(currentSpeed) < 0.5 then
+	if math.abs(currentSpeed) < 0.05 then -- 0.5→0.05: 정지 직전 미세 스냅 구간 대폭 축소
 		currentSpeed = 0
 	end
 
@@ -471,6 +528,7 @@ RunService.Heartbeat:Connect(function(dt: number)
 		and math.abs(steer) > dcfg.steerThreshold
 	if canDrift then
 		drifting = true
+		gripBlend = 0 -- 드리프트 재진입 시 그립 전환 즉시 취소(이전 전환 잔류 방지)
 		-- 게이지 충전(핸들을 더 꺾을수록 빨리 참)
 		nitroCharge = math.min(1, nitroCharge + dt * dcfg.chargeRate * (0.5 + 0.5 * math.abs(steer)))
 	elseif drifting then
@@ -481,20 +539,29 @@ RunService.Heartbeat:Connect(function(dt: number)
 			seat:SetAttribute("NitroEndTime", now + dur)
 		end
 		nitroCharge = 0
+		-- 종료 순간 moveDir을 기억해 0.1초에 걸쳐 heading으로 부드럽게 전환(즉각 스냅 방지)
+		gripFrom = moveDir
+		gripBlend = 1
 	end
 	seat:SetAttribute("Drifting", drifting)
 	seat:SetAttribute("NitroCharge", nitroCharge)
 
 	-- 접지 모델:
-	--  • 평소  : moveDir = heading (진행방향=차머리) → 일반 주행과 100% 동일(조작감 유지)
-	--  • 드리프트: moveDir가 heading을 "느리게" 추종 → 차는 안쪽을 보는데 바깥으로 미끄러짐
+	--  • 드리프트 중   : moveDir가 heading을 느리게 추종 → 바깥으로 미끄러짐
+	--  • 드리프트 종료 : gripBlend(1→0)로 0.1초에 걸쳐 heading으로 부드럽게 전환(즉각 스냅 방지)
+	--  • 일반 주행    : moveDir = heading (즉각 추종, 조작감 유지)
 	if drifting then
-		moveDir = moveDir:Lerp(heading, math.clamp(dt * dcfg.driftGrip, 0, 1))
+		moveDir = moveDir:Lerp(heading, 1 - math.exp(-dcfg.driftGrip * dt))
 		if moveDir.Magnitude > 0 then
 			moveDir = moveDir.Unit
 		else
 			moveDir = heading
 		end
+	elseif gripBlend > 0 then
+		-- 드리프트 종료 직후: gripFrom→heading 보간(약 0.1초, k=10)
+		gripBlend = math.max(0, gripBlend - dt * 10)
+		local blended = gripFrom:Lerp(heading, 1 - gripBlend)
+		moveDir = blended.Magnitude > 0 and blended.Unit or heading
 	else
 		moveDir = heading
 	end
@@ -510,7 +577,8 @@ RunService.Heartbeat:Connect(function(dt: number)
 		turnRate *= dcfg.turnBoost
 	end
 	local direction = currentSpeed >= 0 and 1 or -1
-	seat.AssemblyAngularVelocity = Vector3.new(0, -steer * turnRate * direction, 0)
+	-- smoothedSteer: 이진 입력의 지수 평활값 → 각속도 변화가 프레임마다 부드럽게
+	seat.AssemblyAngularVelocity = Vector3.new(0, -smoothedSteer * turnRate * direction, 0)
 
 	-- 충돌 감지: 빠르게 가려는데 실제 이동이 막히면 벽/차 충돌로 간주 → 불꽃 신호 + 튕김 감속
 	local fxcfg = GameConfig.CarFX
@@ -526,17 +594,19 @@ RunService.Heartbeat:Connect(function(dt: number)
 			then
 				lastCollisionAt = os.clock()
 				seat:SetAttribute("ImpactAt", os.clock())
-				currentSpeed *= 0.4 -- 충돌 감속(튕기는 느낌)
+				-- 즉각 *0.4 대신 0.05초 지수 감쇠(Edit의 damp 루프가 처리).
+				-- exp(-18 × 0.05) ≈ 0.41 → 같은 총 감속량, 3~4프레임에 걸쳐 부드럽게.
+				collisionDampUntil = os.clock() + 0.05
 			end
 		end
 		lastCollisionPos = pos
 	end
 
-	-- 앞바퀴 조향 + 전체 바퀴 굴림 시각화
-	updateWheels(steer, dt)
+	-- 앞바퀴 조향 + 전체 바퀴 굴림 시각화 (평활된 steer로 바퀴가 물리 회전과 동기화)
+	updateWheels(smoothedSteer, dt)
 
 	-- 엔진 사운드 갱신 (속도 비례 피치/볼륨)
-	updateEngineSound(seat, speedFactor, boosting)
+	updateEngineSound(seat, speedFactor, boosting, dt)
 
 	-- ── 자가복구: 출발 후에도 차가 안 움직이면 서버에 재탑승 요청 ──────────
 	-- 방향키(가속/후진)를 확실히 밟고 있는데 0.5초 동안 차가 거의(1.5 studs 미만) 안 움직였다면,

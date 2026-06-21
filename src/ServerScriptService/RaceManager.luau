@@ -40,12 +40,13 @@ type RacerState = {
 	finished: boolean,
 	finishTime: number?,
 	place: number?,
-	item: string?, -- 보유 중인 아이템 id (없으면 nil)
+	items: { string }, -- 보유 아이템 FIFO 배열 (최대 2개; 빈 배열 = 없음)
 	-- 봇 키네매틱 주행 상태
 	route: { Vector3 }?, -- 따라가는 경로(트랙 minimapPath)
 	routePos: number?, -- 경로상의 부동소수 인덱스(정수부=세그먼트, 소수부=세그먼트 내 진행)
 	speed: number?, -- 봇 기본 주행 속도(studs/sec)
 	laneOffset: number?, -- 중앙선 기준 좌우 차선 오프셋(봇끼리 겹침 방지)
+	frozenUntil: number?, -- 물풍선 동결 해제 시각 (workspace:GetServerTimeNow() 기준, nil=정상)
 }
 
 local state = "Idle"
@@ -258,6 +259,24 @@ local function advanceBot(racer: RacerState, dt: number, leaderProgress: number)
 	if not route or #route < 2 or not car or not car.PrimaryPart then
 		return
 	end
+
+	-- 물풍선 동결 중: 경로 진행을 멈추고 공중 부양 위치로 이동
+	if racer.frozenUntil ~= nil then
+		local now = workspace:GetServerTimeNow()
+		if now < (racer.frozenUntil :: number) then
+			-- 현재 routePos 지점의 지면 CFrame에서 Y를 floatHeight만큼 올림
+			-- botCFrameAt이 이미 BOT_RIDE_HEIGHT를 포함하므로, 그 위에 (floatHeight - BOT_RIDE_HEIGHT)를 더해
+			-- 결과적으로 도로면에서 floatHeight만큼 뜬 위치가 된다.
+			local balloonCfg = (GameConfig.Items :: any).balloon
+			local floatH: number = balloonCfg.floatHeight or 18
+			local groundCf = botCFrameAt(route, racer.routePos or 1, racer.laneOffset or 0)
+			car:PivotTo(groundCf + Vector3.new(0, floatH - BOT_RIDE_HEIGHT, 0))
+			return
+		else
+			racer.frozenUntil = nil -- 동결 해제
+		end
+	end
+
 	local cfg = (GameConfig :: any).Bots
 	-- 고무줄 보정: 선두와 진행도(통과 체크포인트 수) 차이에 따라 속도 가감
 	local behind = leaderProgress - racer.progress
@@ -341,6 +360,7 @@ function RaceManager.startRace()
 			lap = 0,
 			progress = 0,
 			finished = false,
+			items = {}, -- 아이템 인벤토리 초기화 (최대 2개)
 		}
 	end
 
@@ -376,6 +396,7 @@ function RaceManager.startRace()
 				lap = 0,
 				progress = 0,
 				finished = false,
+				items = {}, -- 봇은 아이템 미사용; 타입 완전성을 위해 초기화
 				route = route,
 				routePos = routePos,
 				speed = botCfg.baseSpeed + (math.random() - 0.5) * 2 * botCfg.speedVariance,
@@ -539,8 +560,8 @@ local function onItemBoxTouched(box: BasePart, racer: RacerState)
 	if not box:GetAttribute("Active") then
 		return
 	end
-	if racer.item then
-		return -- 이미 보유 중이면 받지 않음
+	if #racer.items >= 2 then
+		return -- 이미 2개 보유 중이면 더 받지 않음
 	end
 	-- 봇 nil 가드: 봇은 아이템 UI가 없으므로 지급하지 않음 (D)
 	if racer.isBot then
@@ -561,10 +582,10 @@ local function onItemBoxTouched(box: BasePart, racer: RacerState)
 	total = math.max(total, 1)
 
 	local itemId = pickRandomItem(myRank, total)
-	racer.item = itemId
+	table.insert(racer.items, itemId) -- FIFO 뒤쪽에 추가 (최대 2개)
 	-- racer.player는 봇 가드로 여기서는 반드시 non-nil
 	if racer.player then
-		Remotes.Event("ItemUpdated"):FireClient(racer.player, itemId)
+		Remotes.Event("ItemUpdated"):FireClient(racer.player, racer.items)
 	end
 
 	task.delay(GameConfig.Items.boxRespawnTime, function()
@@ -772,63 +793,152 @@ local function spawnFreezeBubble(racer: RacerState, duration: number)
 	end)
 end
 
--- 전방 원뿔 안에서 사정거리 내 가장 가까운 다른 레이서 탐색
-local function findFreezeTarget(racer: RacerState): RacerState?
-	local car = racer.car
-	if not car or not car.PrimaryPart then
-		return nil
-	end
-	local cfg = GameConfig.Items.balloon
-	local origin = car.PrimaryPart.Position
-	local forward = car.PrimaryPart.CFrame.LookVector
-	local best: RacerState? = nil
-	local bestDist = math.huge
-	for _, other in pairs(racers) do
-		-- 봇은 키네매틱이라 아이템 효과 면역 → 물풍선 대상에서 제외
-		if not other.isBot and other.userId ~= racer.userId and other.car and other.car.PrimaryPart and not other.finished then
-			local toOther = other.car.PrimaryPart.Position - origin
-			local dist = toOther.Magnitude
-			if dist > 1 and dist <= cfg.range then
-				if forward:Dot(toOther.Unit) >= cfg.coneDot and dist < bestDist then
-					bestDist = dist
-					best = other
-				end
-			end
-		end
-	end
-	return best
-end
-
--- 물풍선: 앞쪽 가까운 상대를 3초간 가둠. 맞출 상대가 없으면 소모하지 않음
-local function useBalloon(racer: RacerState): boolean
-	local cfg = GameConfig.Items.balloon
-	local target = findFreezeTarget(racer)
-	if not target or not target.car or not target.car.PrimaryPart then
-		if racer.player then
-			notify(racer.player, "앞에 맞출 상대가 없어요!")
-		end
-		return false
+-- 물풍선 splash 처리: landPos 주변(2D XZ, splashR 반경) 모든 레이서(봇 포함, 본인/완주자 제외)를
+-- 공중 부양+동결. 방어막이 있으면 그 대상만 스킵. 착지(arrival) 시점에 호출된다.
+local function balloonSplash(throwerId: number, fromUserId: number, landPos: Vector3, splashR: number, duration: number)
+	if state ~= "Racing" then
+		return
 	end
 	local now = workspace:GetServerTimeNow()
-	-- 방어막(ShieldEndTime) 유효 시 피격 스킵 (C)
-	local shieldEnd = target.car.PrimaryPart:GetAttribute("ShieldEndTime")
-	if typeof(shieldEnd) == "number" and now < shieldEnd then
-		if racer.player then
-			notify(racer.player, "상대방의 방어막이 물풍선을 막았어요!")
+	local hitCount = 0
+	for _, other in pairs(racers) do
+		if other.userId == throwerId or other.finished then
+			continue
 		end
-		return false
+		if not other.car or not other.car.PrimaryPart then
+			continue
+		end
+		local otherPos = other.car.PrimaryPart.Position
+		local dx = otherPos.X - landPos.X
+		local dz = otherPos.Z - landPos.Z
+		if math.sqrt(dx * dx + dz * dz) > splashR then
+			continue
+		end
+
+		-- 방어막(ShieldEndTime) 유효 시 이 대상만 스킵
+		local shieldEnd = other.car.PrimaryPart:GetAttribute("ShieldEndTime")
+		if typeof(shieldEnd) == "number" and now < shieldEnd then
+			if other.player then
+				notify(other.player, "🛡️ 방어막이 물풍선을 막았어요!")
+			end
+			continue
+		end
+
+		if other.isBot then
+			-- 봇: frozenUntil 타임스탬프 설정 → advanceBot이 공중 부양 처리
+			other.frozenUntil = now + duration
+		else
+			-- 사람: FreezeEndTime 어트리뷰트 → CarController가 공중 부양 처리
+			other.car.PrimaryPart:SetAttribute("FreezeEndTime", now + duration)
+			if other.player then
+				notify(other.player, "💧 물풍선에 맞았어요! 공중에 갇혔어요!")
+			end
+		end
+		spawnFreezeBubble(other, duration)
+		hitCount += 1
 	end
-	target.car.PrimaryPart:SetAttribute("FreezeEndTime", now + cfg.freezeDuration)
-	spawnFreezeBubble(target, cfg.freezeDuration)
+
+	-- 착지(물보라) 이펙트 브로드캐스트: 클라이언트에서 물보라 연출 가능
 	Remotes.Event("ItemEffect"):FireAllClients({
 		kind = "balloon",
-		fromUserId = racer.player and racer.player.UserId or 0,
-		userId = target.player and target.player.UserId or 0,
+		fromUserId = fromUserId,
+		landX = landPos.X,
+		landY = landPos.Y,
+		landZ = landPos.Z,
+		hit = hitCount,
 	})
-	if target.player then
-		notify(target.player, "💧 물풍선에 맞았어요! 잠시 갇힘!")
+end
+
+-- 물풍선 시각 투사체: startPos→landPos 포물선으로 날아가 착지하면 onLand() 호출 후 사라짐.
+-- 서버에서 앵커로 직접 이동(네트워크 소유권 무관). 경주 종료/파트 소실 시 onLand 없이 정리.
+local function spawnBalloonProjectile(startPos: Vector3, landPos: Vector3, onLand: () -> ())
+	local cfg = (GameConfig.Items :: any).balloon
+	local flightTime: number = cfg.flightTime or 0.5
+	local arcHeight: number = cfg.arcHeight or 16
+
+	local ball = Instance.new("Part")
+	ball.Name = "WaterBalloon"
+	ball.Shape = Enum.PartType.Ball
+	ball.Anchored = true
+	ball.CanCollide = false
+	ball.CanQuery = false
+	ball.CanTouch = false
+	ball.Size = Vector3.new(4.5, 4.5, 4.5)
+	ball.Color = cfg.color
+	ball.Material = Enum.Material.Glass
+	ball.Transparency = 0.2
+	ball.CFrame = CFrame.new(startPos)
+	ball.Parent = itemParent()
+
+	local bb = Instance.new("BillboardGui")
+	bb.Size = UDim2.fromOffset(48, 48)
+	bb.StudsOffset = Vector3.new(0, 1.4, 0)
+	bb.Adornee = ball
+	bb.Parent = ball
+	local lbl = Instance.new("TextLabel")
+	lbl.Size = UDim2.fromScale(1, 1)
+	lbl.BackgroundTransparency = 1
+	lbl.Text = cfg.emoji
+	lbl.TextScaled = true
+	lbl.Parent = bb
+
+	local t0 = workspace:GetServerTimeNow()
+	local conn: RBXScriptConnection? = nil
+	conn = RunService.Heartbeat:Connect(function()
+		-- 경주 종료/파트 소실 시: 효과 없이 정리
+		if state ~= "Racing" or not ball.Parent then
+			if conn then
+				conn:Disconnect()
+			end
+			if ball.Parent then
+				ball:Destroy()
+			end
+			return
+		end
+		local a = math.clamp((workspace:GetServerTimeNow() - t0) / flightTime, 0, 1)
+		local pos = startPos:Lerp(landPos, a) + Vector3.new(0, math.sin(a * math.pi) * arcHeight, 0)
+		ball.CFrame = CFrame.new(pos)
+		if a >= 1 then
+			if conn then
+				conn:Disconnect()
+			end
+			ball:Destroy()
+			onLand()
+		end
+	end)
+end
+
+-- 물풍선: 전방 throwDistance 지점에 던진다(항상 소모). 물풍선이 착지하면 splash 범위 내
+-- 모든 레이서(봇 포함)를 공중 3초 부양+동결. 맞을 상대가 없어도 항상 아이템을 소모.
+local function useBalloon(racer: RacerState): boolean
+	local car = racer.car
+	if not car or not car.PrimaryPart then
+		return true -- 차가 없어도 소모 처리
 	end
-	return true
+	local cfg = (GameConfig.Items :: any).balloon
+	local seat = car.PrimaryPart
+
+	-- 투척 착지 지점: 현재 차 전방 방향으로 throwDistance 스터드 앞(평면 XZ, Y는 도로 높이 유지)
+	local forward = seat.CFrame.LookVector
+	local flat = Vector3.new(forward.X, 0, forward.Z)
+	if flat.Magnitude > 0.01 then
+		flat = flat.Unit
+	else
+		flat = Vector3.new(0, 0, -1)
+	end
+	local throwDist: number = cfg.throwDistance or 80
+	local splashR: number = cfg.splashRadius or 18
+	local duration: number = cfg.freezeDuration
+	local landPos = seat.Position + flat * throwDist
+	local throwerId = racer.userId
+	local fromUserId = racer.player and racer.player.UserId or 0
+
+	-- 던지는 물풍선 시각 연출 → 착지 순간 splash 동결(착지 시점 위치로 재판정)
+	local startPos = seat.Position + Vector3.new(0, 2.5, 0)
+	spawnBalloonProjectile(startPos, landPos, function()
+		balloonSplash(throwerId, fromUserId, landPos, splashR, duration)
+	end)
+	return true -- 맞을 상대가 없어도 항상 소모
 end
 
 -- 버섯(대시): 본인 속도를 잠깐 폭발적으로 높임 (C)
@@ -890,7 +1000,7 @@ function RaceManager.useItem(player: Player)
 		return
 	end
 	local racer = racers[player.UserId]
-	if not racer or not racer.item or not racer.car or not racer.car.PrimaryPart then
+	if not racer or #racer.items == 0 or not racer.car or not racer.car.PrimaryPart then
 		return
 	end
 	-- 갇혀 있는 동안에는 사용 불가
@@ -900,7 +1010,7 @@ function RaceManager.useItem(player: Player)
 		return
 	end
 
-	local item = racer.item
+	local item = racer.items[1] -- FIFO: 맨 앞(가장 오래된) 아이템 사용
 	local consumed = true
 	if item == "banana" then
 		dropBanana(racer)
@@ -923,8 +1033,8 @@ function RaceManager.useItem(player: Player)
 	end
 
 	if consumed then
-		racer.item = nil
-		Remotes.Event("ItemUpdated"):FireClient(player, "none")
+		table.remove(racer.items, 1) -- FIFO: 맨 앞 제거, 나머지가 앞으로 당겨짐
+		Remotes.Event("ItemUpdated"):FireClient(player, racer.items)
 	end
 end
 

@@ -187,17 +187,12 @@ local function returnToCar()
 		ensureDefault()
 		return
 	end
-	local cf = myCarCFrame()
-	if not cf then
+	if not myCarCFrame() then
 		ensureDefault()
 		return
 	end
 	unbindOrbit()
 	mode = "return"
-	-- 차 뒤 위쪽에서 차 앞을 바라보는 시점(주행 카메라와 유사). 차 전방 = -Z.
-	local eye = (cf * CFrame.new(0, 5.8, 15)).Position -- +Z = 차 뒤
-	local look = (cf * CFrame.new(0, 1.5, -8)).Position -- -Z = 차 앞
-	local targetCFrame = CFrame.lookAt(eye, look)
 	local fromCFrame = cam.CFrame
 	local elapsed = 0
 	cam.CameraType = Enum.CameraType.Scriptable
@@ -209,7 +204,16 @@ local function returnToCar()
 		elapsed += dt
 		local a = math.clamp(elapsed / RETURN_TIME, 0, 1)
 		local e = 1 - (1 - a) * (1 - a) -- 이즈아웃(처음 빠르고 끝에서 부드럽게)
-		c.CFrame = fromCFrame:Lerp(targetCFrame, e)
+		-- 매 프레임 차량의 최신 위치로 목표를 갱신 → GO 후 가속 중인 차를 실시간 추적.
+		-- 콜백 시작 시점의 stale cf를 캡처해 두면 Custom 인계 시 위치가 어긋나 끊김이 생긴다.
+		local liveCf = myCarCFrame()
+		if liveCf then
+			local targetCFrame = CFrame.lookAt(
+				(liveCf * CFrame.new(0, 5.8, 15)).Position, -- +Z = 차 뒤
+				(liveCf * CFrame.new(0, 1.5, -8)).Position  -- -Z = 차 앞
+			)
+			c.CFrame = fromCFrame:Lerp(targetCFrame, e)
+		end
 		if a >= 1 then
 			unbindReturn()
 			c.CameraType = Enum.CameraType.Custom -- 기본 추적 카메라로 인계

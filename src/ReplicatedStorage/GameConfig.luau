@@ -315,14 +315,20 @@ GameConfig.Items = {
 		duration = 2.2, -- 지속 시간 (초)
 	},
 
-	-- 물풍선: 앞쪽 가까운 상대에게 던져 3초간 가둠
+	-- 물풍선: 전방 throwDistance 지점에 투척, splash 범위 내 레이서(봇 포함)를 공중 부양+동결
 	balloon = {
 		emoji = "💧",
 		displayName = "물풍선",
-		freezeDuration = 3.0, -- 맞으면 갇히는 시간 (초)
-		range = 140, -- 사정거리 (스터드)
-		coneDot = 0.5, -- 전방 원뿔 정렬도(0~1, 클수록 정면만)
+		freezeDuration = 3.0,  -- 맞으면 공중에 갇히는 시간 (초)
+		throwDistance = 80,    -- 전방 투척 거리 (스터드)
+		splashRadius = 18,     -- 착지 지점 주변 splash 반경 (스터드)
+		floatHeight = 18,      -- 공중 부양 높이 (스터드, 도로 면 기준)
+		flightTime = 0.5,      -- 던진 물풍선이 착지까지 걸리는 시간 (초)
+		arcHeight = 16,        -- 투척 포물선 정점 높이 (스터드)
 		color = Color3.fromRGB(90, 190, 255),
+		-- 하위 호환 유지 (이전 버전 세이브 읽기 등)
+		range = 140,
+		coneDot = 0.5,
 	},
 
 	-- 대시(버섯): 사용 시 본인 일시적 속도/가속 대폭 상승

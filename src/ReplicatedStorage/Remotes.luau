@@ -31,7 +31,7 @@ local EVENT_NAMES = {
 	"RequestDriveFix", -- 출발 후 차가 안 움직일 때(소유권 누락) 서버에 재탑승/소유권 복구 요청
 
 	-- 서버 → 클라
-	"ItemUpdated", -- 보유 아이템 변경 (itemId 또는 "none")
+	"ItemUpdated", -- 보유 아이템 인벤토리 변경 (string 배열; 예: {} / {"banana"} / {"banana","rocket"})
 	"ItemEffect", -- 아이템 발동 연출 (kind, ...)
 	"PlayerDataUpdated", -- 플레이어 데이터(머니/보유차/커스텀) 갱신
 	"QueueStateChanged", -- 대기열 상태/카운트다운 변경
