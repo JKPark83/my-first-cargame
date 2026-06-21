@@ -1049,8 +1049,48 @@ function RaceManager.onPlayerLeaving(player: Player)
 	end
 end
 
+-- 출발 후에도 차가 안 움직일 때(네트워크 소유권이 운전자에게 없을 때) 클라이언트가 보내는
+-- 자가복구 요청. 사용자가 손으로 하던 "내렸다 다시 타기"를 서버가 자동으로 재현한다.
+-- (수동 재탑승이 통하는 이유 = 엔진이 "착석 순간" 시트 소유권을 운전자에게 자동 부여하기 때문.
+--  서버의 SetNetworkOwner가 환경에 따라 안 먹어도, 이 재착석 경로는 확실히 통한다.)
+local function handleDriveFix(player: Player)
+	local racer = racers[player.UserId]
+	if not racer or racer.isBot then
+		return
+	end
+	local car = racer.car
+	if not (car and car.PrimaryPart and car.PrimaryPart:IsA("VehicleSeat")) then
+		return
+	end
+	local seat = car.PrimaryPart :: VehicleSeat
+	local char = player.Character
+	local humanoid = char and char:FindFirstChildOfClass("Humanoid")
+	if not humanoid or humanoid.Health <= 0 then
+		return
+	end
+	-- 이미 운전자가 소유 중이고 정상 착석이면(예: 벽에 막혀 안 가는 정상 상황) 건드리지 않는다.
+	local owner: Player? = nil
+	local ok = pcall(function()
+		owner = seat:GetNetworkOwner()
+	end)
+	if ok and owner == player and seat.Occupant == humanoid then
+		return
+	end
+	-- 소유권이 없다 → 잠깐 일어섰다 다시 앉혀(=수동 재탑승) 엔진이 소유권을 재부여하게 한다.
+	pcall(function()
+		humanoid.Sit = false
+	end)
+	task.wait(0.12)
+	if seat.Parent and humanoid.Parent and humanoid.Health > 0 then
+		CarSpawner.seatDriver(seat, humanoid, player)
+		seat:SetAttribute("RaceFrozen", false) -- 복구 시 동결 잔류 방지
+	end
+end
+
 function RaceManager.init()
 	Players.PlayerRemoving:Connect(RaceManager.onPlayerLeaving)
+	-- 출발 후 차량이 안 움직이는 소유권 누락 자가복구 요청 처리
+	Remotes.Event("RequestDriveFix").OnServerEvent:Connect(handleDriveFix)
 	-- 라운지 기본 조명 스냅샷(테마 조명 적용 후 복원 기준값)
 	defaultLighting = captureLighting()
 	broadcastQueue()

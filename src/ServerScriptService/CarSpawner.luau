@@ -521,10 +521,12 @@ function CarSpawner.spawnBot(spawnCFrame: CFrame, parent: Instance?, botName: st
 
 	-- 봇은 물리 시뮬레이션 대신 서버가 CFrame으로 직접 이동시킨다.
 	-- PrimaryPart(시트)를 앵커하면 용접/Motor6D로 붙은 차체 전체가 함께 따라온다.
-	-- 모든 파트의 충돌을 꺼서 플레이어 차와 부딪히지 않게 한다(끼임/불공정 방지).
 	local seat = model.PrimaryPart :: VehicleSeat
 	seat.Anchored = true
 	seat.Disabled = true -- 플레이어가 봇 차에 우발적으로 탑승하지 못하게
+	-- 바퀴/장식 파트는 충돌을 끄되, 차체(시트) 한 개만 충돌을 켜서
+	-- 플레이어 차와 봇이 실제로 "부딪히게" 한다. 봇은 앵커 상태라 밀리지 않는
+	-- "움직이지 않는 범퍼"가 되고, 플레이어는 부딪히면 튕기며 감속한다(충돌 불꽃 FX 트리거).
 	for _, d in ipairs(model:GetDescendants()) do
 		if d:IsA("BasePart") then
 			(d :: BasePart).CanCollide = false
@@ -532,6 +534,7 @@ function CarSpawner.spawnBot(spawnCFrame: CFrame, parent: Instance?, botName: st
 			d:Destroy() -- 봇 엔진음 제거(다수 봇의 소음 누적 방지)
 		end
 	end
+	seat.CanCollide = true -- 차체 충돌 박스: 플레이어와의 차대차 충돌 활성화
 
 	CarSpawner.setNameTag(model, "🤖 " .. botName)
 	model:SetAttribute("IsBot", true)

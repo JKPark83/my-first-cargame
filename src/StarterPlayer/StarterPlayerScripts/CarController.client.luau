@@ -14,13 +14,23 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ContextActionService = game:GetService("ContextActionService")
+local UserInputService = game:GetService("UserInputService")
 
 local GameConfig = require(ReplicatedStorage.GameConfig)
+local Remotes = require(ReplicatedStorage.Remotes)
 
 local player = Players.LocalPlayer
 
 local activeSeat: VehicleSeat? = nil
 local currentSpeed = 0 -- 현재 전진 속도(음수 = 후진)
+
+-- 자가복구(소유권 누락 대비): 출발했는데 방향키를 밟아도 차가 "전혀" 안 움직이면
+-- (네트워크 소유권이 서버에 있어 클라 속도 쓰기가 무시되는 상태), 서버에 재탑승을 요청해
+-- 사용자가 손으로 "내렸다 다시 타기"를 하던 것을 자동으로 재현한다.
+local stuckTime = 0 -- 가속 입력 중 차가 안 움직인 누적 시간
+local stuckMove = 0 -- 같은 창(window) 동안 실제로 이동한 거리(평면, studs)
+local lastStuckPos: Vector3? = nil -- 직전 프레임 위치(이동량 측정용)
+local lastDriveFixAt = -10 -- 마지막 복구 요청 시각(디바운스, os.clock)
 
 -- 점프 잠금 가드: 탑승 중 점프(=VehicleSeat 자동 하차)를 막는다.
 -- 서버에서 JumpPower=0만으로는 하차가 확실히 막히지 않으므로,
@@ -248,6 +258,10 @@ RunService.Heartbeat:Connect(function(dt: number)
 		activeSeat = seat
 		currentSpeed = 0
 		wheelMotors = {}
+		-- 자가복구 상태 초기화(차가 바뀌면 새로 측정)
+		lastStuckPos = nil
+		stuckTime = 0
+		stuckMove = 0
 		if seat then
 			ensureEngineSound(seat) -- 새 차량 탑승 시 동작하는 엔진 사운드 선택
 			cacheWheels(seat) -- 바퀴 Motor6D 캐시
@@ -302,6 +316,10 @@ RunService.Heartbeat:Connect(function(dt: number)
 		moveDir = flatLook(seat) -- 동결 중엔 진행방향을 차머리에 고정(출발 시 깔끔)
 		resetDrift(seat)
 		updateEngineSound(seat, 0, false)
+		-- 동결 중엔 자가복구 측정을 멈추고 창을 리셋(GO 직후부터 새로 측정)
+		lastStuckPos = nil
+		stuckTime = 0
+		stuckMove = 0
 		return
 	end
 
@@ -489,4 +507,38 @@ RunService.Heartbeat:Connect(function(dt: number)
 
 	-- 엔진 사운드 갱신 (속도 비례 피치/볼륨)
 	updateEngineSound(seat, speedFactor, boosting)
+
+	-- ── 자가복구: 출발 후에도 차가 안 움직이면 서버에 재탑승 요청 ──────────
+	-- 방향키(가속/후진)를 확실히 밟고 있는데 0.5초 동안 차가 거의(1.5 studs 미만) 안 움직였다면,
+	-- 네트워크 소유권이 운전자에게 없어 속도 쓰기가 무시되는 상태로 보고 서버에 복구를 요청한다.
+	-- 서버는 운전자가 이미 소유 중이면(벽에 막힌 정상 상황 등) 무시하므로 오작동이 없다.
+	do
+		local p = seat.Position
+		local lsp = lastStuckPos
+		if lsp then
+			stuckMove += Vector3.new(p.X - lsp.X, 0, p.Z - lsp.Z).Magnitude
+		end
+		lastStuckPos = p
+		-- "운전자가 움직이려는 의도"를 시트 입력(ThrottleFloat)뿐 아니라 실제 키보드(WASD/방향키)로도
+		-- 감지한다 → 혹시 입력 자체가 안 잡히는 드문 경우에도 재탑승으로 함께 복구된다.
+		local wantsDrive = math.abs(throttle) > 0.5
+			or UserInputService:IsKeyDown(Enum.KeyCode.W)
+			or UserInputService:IsKeyDown(Enum.KeyCode.Up)
+			or UserInputService:IsKeyDown(Enum.KeyCode.S)
+			or UserInputService:IsKeyDown(Enum.KeyCode.Down)
+		if wantsDrive then
+			stuckTime += dt
+			if stuckTime >= 0.5 then
+				if stuckMove < 1.5 and (os.clock() - lastDriveFixAt) > 2 then
+					lastDriveFixAt = os.clock()
+					Remotes.Event("RequestDriveFix"):FireServer()
+				end
+				stuckTime = 0
+				stuckMove = 0
+			end
+		else
+			stuckTime = 0
+			stuckMove = 0
+		end
+	end
 end)

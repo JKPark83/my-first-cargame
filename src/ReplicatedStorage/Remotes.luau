@@ -28,6 +28,7 @@ local EVENT_NAMES = {
 	"RequestLeaveQueue", -- 대기열 떠나기
 	"CarControlInput", -- 주행 입력 (throttle, steer, ...)
 	"RequestUseItem", -- 보유 아이템 사용 요청
+	"RequestDriveFix", -- 출발 후 차가 안 움직일 때(소유권 누락) 서버에 재탑승/소유권 복구 요청
 
 	-- 서버 → 클라
 	"ItemUpdated", -- 보유 아이템 변경 (itemId 또는 "none")
