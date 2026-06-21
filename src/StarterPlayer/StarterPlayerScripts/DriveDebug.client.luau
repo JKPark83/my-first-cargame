@@ -20,7 +20,8 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 
 -- 새 빌드를 로딩했는지 한눈에 확인하는 마커(수정할 때마다 숫자를 올린다)
-local BUILD_TAG = "🔧 DRIVE DEBUG · build 0621-v2 (자가복구+진단)"
+-- v3: 시트 ThrottleFloat 무시하고 키보드를 직접 읽어 구동하도록 바꿈. throttle 표시는 참고용(0이어도 정상).
+local BUILD_TAG = "🔧 DRIVE DEBUG · build 0621-v3 (키보드 직접구동)"
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
@@ -101,14 +102,12 @@ RunService.Heartbeat:Connect(function(dt: number)
 		verdict = "입력 대기 — 방향키(↑/↓) 또는 W/S를 눌러보세요."
 		color = Color3.fromRGB(170, 170, 170)
 	elseif speed < 3 and moved < 3 then
-		if math.abs(throttle) < 0.1 and (keyFwd or keyBack) then
-			verdict = "❌ 입력 미반영: 키는 눌리는데 시트 Throttle=0"
-		else
-			verdict = "❌ 소유권 의심: 입력은 있는데 차가 안 움직임"
-		end
+		-- v3부터 키보드 직접구동이라 throttle=0이어도 키만 눌리면 가야 정상.
+		-- 그래도 안 가면 = 네트워크 소유권 문제(0.5초 후 자가복구가 재착석 시도).
+		verdict = "❌ 안 움직임 — 소유권 문제 의심(자가복구 시도 중...)"
 		color = Color3.fromRGB(255, 90, 90)
 	else
-		verdict = "✅ 정상 주행 중!"
+		verdict = "✅ 정상 주행 중! (키보드 직접구동)"
 		color = Color3.fromRGB(120, 255, 160)
 	end
 
