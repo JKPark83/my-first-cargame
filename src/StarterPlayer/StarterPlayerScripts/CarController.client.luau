@@ -357,6 +357,7 @@ RunService.Stepped:Connect(function(_t: number, dt: number)
 	--    클라이언트가 직접 속도를 0으로 눌러 제자리를 지킨다 → GO 즉시 방향키로 출발 가능.
 	if seat.Anchored or seat:GetAttribute("RaceFrozen") then
 		currentSpeed = 0
+		smoothedSteer = 0 -- 카운트다운 중 조향 평활값 0 유지 → GO 출발을 중립 조향에서 시작
 		if not seat.Anchored then
 			local vy = seat.AssemblyLinearVelocity.Y -- 중력(수직)은 보존해 지면에 안착
 			seat.AssemblyLinearVelocity = Vector3.new(0, vy, 0)
@@ -402,13 +403,20 @@ RunService.Stepped:Connect(function(_t: number, dt: number)
 	--    대신 AssemblyLinearVelocity를 매 프레임 P-제어로 덮어써 중력을 상쇄하며 부양한다.
 	if not shielded and freezeEnd ~= nil and now < freezeEnd then
 		currentSpeed = 0
-		-- 첫 프레임: 부양 기준 Y 좌표 캡처 (도로 높이, 이후 변하지 않음)
+		smoothedSteer = 0 -- 동결 중 조향 평활값 0 유지 → 해제 직후 갑작스런 조향 튐(랙) 방지
+		-- 첫 프레임: 부양 기준 Y 캡처. 차 바로 아래 "도로 표면"을 레이캐스트로 찾는다.
+		-- (공중에서 맞거나 충돌로 살짝 떠도 도로 기준 일정 높이로 부양 → 봇 부양과 동일 높이)
 		if freezeStartY == nil then
-			freezeStartY = seat.Position.Y
+			local carModel = seat:FindFirstAncestorWhichIsA("Model")
+			local rp = RaycastParams.new()
+			rp.FilterType = Enum.RaycastFilterType.Exclude
+			rp.FilterDescendantsInstances = { carModel or seat }
+			local groundHit = workspace:Raycast(seat.Position, Vector3.new(0, -200, 0), rp)
+			freezeStartY = groundHit and groundHit.Position.Y or seat.Position.Y
 		end
 		local balloonCfg = (GameConfig.Items :: any).balloon
 		local floatH: number = (balloonCfg.floatHeight :: number?) or 18
-		local targetY = (freezeStartY :: number) + floatH
+		local targetY = (freezeStartY :: number) + floatH -- 도로면 + floatHeight (봇과 동일)
 		-- P 제어: 오차 * Kp → 목표 Y 속도 (Kp=8, 최대 38 studs/s).
 		-- 매 프레임 AssemblyLinearVelocity를 덮어쓰므로 프레임레이트와 무관하게 안정 수렴.
 		local yError = targetY - seat.Position.Y
