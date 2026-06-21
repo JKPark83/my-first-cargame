@@ -46,6 +46,15 @@ cc.Brightness = 0
 cc.Contrast = 0
 cc.Parent = Lighting
 
+-- ── DOF(로켓 전용, 평소엔 FarIntensity=0으로 비활성) ────────────
+local dof = Instance.new("DepthOfFieldEffect")
+dof.Name = "SpeedFXDof"
+dof.FarIntensity = 0
+dof.NearIntensity = 0
+dof.InFocusRadius = 22
+dof.FocusDistance = 0
+dof.Parent = Lighting
+
 -- ── 화면 가장자리 비네팅(4개 그라데이션 바, 에셋 불필요) ──────
 local gui = Instance.new("ScreenGui")
 gui.Name = "SpeedFX"
@@ -124,6 +133,7 @@ RunService.Heartbeat:Connect(function(dt: number)
 	local seat = findSeat()
 
 	local speedF, accelF, boostF = 0, 0, 0
+	local rocketBoosting = false -- 로켓 전용 플래그(DOF/비네팅 분기용)
 	if seat then
 		local v = seat.AssemblyLinearVelocity
 		local speed = Vector3.new(v.X, 0, v.Z).Magnitude
@@ -136,8 +146,9 @@ RunService.Heartbeat:Connect(function(dt: number)
 		local boostEnd = seat:GetAttribute("BoostEndTime") :: number?
 		local rocketEnd = seat:GetAttribute("RocketEndTime") :: number?
 		local nitroEnd = seat:GetAttribute("NitroEndTime") :: number? -- 드리프트 미니터보/로켓스타트
+			rocketBoosting = (rocketEnd ~= nil and now < rocketEnd) -- 로켓 전용 플래그
 			local boosting = (boostEnd ~= nil and now < boostEnd)
-				or (rocketEnd ~= nil and now < rocketEnd)
+				or rocketBoosting
 				or (nitroEnd ~= nil and now < nitroEnd)
 			boostF = boosting and 1 or 0
 
@@ -153,6 +164,7 @@ RunService.Heartbeat:Connect(function(dt: number)
 	else
 		prevBoosting = false
 		prevSpeed = 0
+		dof.FarIntensity = 0 -- 하차 시 DOF 즉시 0 복구
 	end
 
 	boostPunch = math.max(0, boostPunch - dt / 0.4)
@@ -162,8 +174,11 @@ RunService.Heartbeat:Connect(function(dt: number)
 		+ cfg.maxFovAdd * speedF
 		+ cfg.accelFovAdd * accelF
 		+ cfg.boostFovPunch * (boostF + 0.5 * boostPunch)
-	local targetBlur = cfg.blurMax * speedF + cfg.blurBoostExtra * boostF
-	local targetVig = math.clamp(cfg.vignetteMax * speedF + cfg.vignetteBoostExtra * boostF, 0, 0.72)
+	local targetBlur = cfg.blurBoostExtra * boostF -- 일반속도 블러 제거(speedF 항 삭제)
+	-- 로켓 중이면 터널 비네팅 강화, 아니면 속도/부스트 비례
+	local targetVig = rocketBoosting
+		and cfg.rocketTunnelVignette
+		or math.clamp(cfg.vignetteMax * speedF + cfg.vignetteBoostExtra * boostF, 0, 0.72)
 	local targetShake = cfg.shakeMax * speedF + cfg.shakeBoostExtra * (boostF * 0.5 + boostPunch)
 
 	-- 적용(부드럽게 추종)
@@ -171,14 +186,34 @@ RunService.Heartbeat:Connect(function(dt: number)
 	if cam then
 		cam.FieldOfView = lerp(cam.FieldOfView, targetFov, k)
 	end
-	blur.Size = lerp(blur.Size, targetBlur, k)
+	-- 로켓 중: 전역 블러 0 강제, 아니면 부스트 블러 추종
+	if rocketBoosting then
+		blur.Size = 0
+	else
+		blur.Size = lerp(blur.Size, targetBlur, k)
+	end
 	shakeIntensity = lerp(shakeIntensity, targetShake, k)
 	cc.Saturation = lerp(cc.Saturation, 0.18 * (boostF * 0.5 + boostPunch * 0.5), k)
 	cc.Brightness = lerp(cc.Brightness, 0.05 * boostPunch, k)
 	cc.Contrast = lerp(cc.Contrast, 0.12 * boostF, k)
 
+	-- 로켓 DOF: 내 차 선명 + 원경 흐림(FarIntensity), 로켓 종료·하차 시 즉시 0
+	if rocketBoosting and cam and seat then
+		local carPos = seat.Position
+		local camPos = cam.CFrame.Position
+		dof.FocusDistance = (camPos - carPos).Magnitude
+		dof.FarIntensity = cfg.rocketDofFarIntensity
+		dof.NearIntensity = 0
+		dof.InFocusRadius = cfg.rocketDofInFocusRadius
+	else
+		dof.FarIntensity = 0 -- 로켓 종료 시 DOF 즉시 복구
+	end
+
 	curVig = lerp(curVig, targetVig, k)
-	local tint = Color3.fromRGB(0, 0, 0):Lerp(Color3.fromRGB(40, 90, 170), boostF * 0.6)
+	-- 로켓 중: 흰빛(220,240,255) 터널 틴트; 일반 부스트: 파랑빛 틴트
+	local tint = rocketBoosting
+		and Color3.fromRGB(220, 240, 255)
+		or Color3.fromRGB(0, 0, 0):Lerp(Color3.fromRGB(40, 90, 170), boostF * 0.6)
 	for _, e in ipairs(edges) do
 		e.BackgroundTransparency = 1 - curVig
 		e.BackgroundColor3 = tint

@@ -30,11 +30,22 @@ local ORBIT_HEIGHT = 13 -- 카메라 높이
 local ORBIT_SPEED = 0.9 -- rad/초 (3→1 약 2초 동안 ~100° 스윕)
 local RETURN_TIME = 0.85 -- 차 뒤로 복귀하는 이징 시간(초)
 
+-- 시상대 전용 궤도 카메라 상수
+local PODIUM_STEP = "PodiumOrbitCam"
+local PODIUM_RADIUS = 50        -- 시상대: 넓은 궤도 반경 (출발보다 훨씬 큰 화각)
+local PODIUM_HEIGHT = 22        -- 시상대: 높은 고도 (전체 시상대 조망)
+local PODIUM_SPEED = 0.35       -- 시상대: 느린 회전 (장엄한 연출)
+local PODIUM_DURATION = 9       -- GameConfig.Race.podiumDuration 미러 (초)
+
 local mode: "idle" | "orbit" | "return" = "idle"
 local orbitBound = false
 local returnBound = false
 local orbitCenter = Vector3.zero
 local orbitAngle = 0
+
+-- 시상대 카메라 상태
+local podiumBound = false
+local podiumMode = false        -- 시상대 카메라 활성 여부
 
 local function getCamera(): Camera?
 	return workspace.CurrentCamera
@@ -50,6 +61,39 @@ local function myCarCFrame(): CFrame?
 	local seat = hum and hum.SeatPart
 	if seat and seat:IsA("VehicleSeat") then
 		return seat.CFrame
+	end
+	return nil
+end
+
+-- top3[1] 차량 세계 좌표 탐색 (시상대 카메라 중심용)
+-- results entry 구조: {player=Player, name=string, ...} 또는 {userId=number, ...}
+local function findTop1CarPos(top3: {any}): Vector3?
+	if not top3 or not top3[1] then
+		return nil
+	end
+	local entry = top3[1]
+	local targetPlayer: Player? = nil
+	if typeof(entry.player) == "Instance" and entry.player:IsA("Player") then
+		targetPlayer = entry.player :: Player
+	elseif typeof(entry.userId) == "number" then
+		targetPlayer = Players:GetPlayerByUserId(entry.userId :: number)
+	end
+	if not targetPlayer then
+		return nil
+	end
+	local char = targetPlayer.Character
+	if not char then
+		return nil
+	end
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	local seat = hum and hum.SeatPart
+	if seat and seat:IsA("VehicleSeat") then
+		return (seat :: VehicleSeat).CFrame.Position
+	end
+	-- 차에서 내렸거나 앵커된 경우 루트파트 위치 사용
+	local root = char:FindFirstChild("HumanoidRootPart")
+	if root and root:IsA("BasePart") then
+		return (root :: BasePart).Position
 	end
 	return nil
 end
@@ -86,10 +130,19 @@ local function unbindReturn()
 	end
 end
 
--- 일반(추적) 카메라로 원복 — 안전망
+local function unbindPodium()
+	if podiumBound then
+		RunService:UnbindFromRenderStep(PODIUM_STEP)
+		podiumBound = false
+	end
+end
+
+-- 일반(추적) 카메라로 원복 — 안전망 (시상대 포함 전체 정리)
 local function ensureDefault()
 	unbindOrbit()
 	unbindReturn()
+	unbindPodium()
+	podiumMode = false
 	mode = "idle"
 	local cam = getCamera()
 	if cam and cam.CameraType == Enum.CameraType.Scriptable then
@@ -166,6 +219,48 @@ local function returnToCar()
 	returnBound = true
 end
 
+-- 시상대 시네마틱 궤도 카메라 시작
+-- payload: { results: {any}, top3: {any} }
+local function startPodiumOrbit(payload: {[string]: any})
+	local cam = getCamera()
+	if not cam then
+		return
+	end
+	-- top3[1] 차 위치를 중심으로; 없으면 현재 카메라 전방 30u 지점 사용
+	local top3 = payload.top3 or {}
+	local center: Vector3 = findTop1CarPos(top3) or (cam.CFrame.Position + cam.CFrame.LookVector * 30)
+
+	podiumMode = true
+	unbindOrbit()
+	unbindReturn()
+
+	local podiumAngle = 0
+	cam.CameraType = Enum.CameraType.Scriptable
+
+	RunService:BindToRenderStep(PODIUM_STEP, CAM_PRIORITY, function(dt: number)
+		local c = getCamera()
+		if not c then
+			return
+		end
+		podiumAngle += dt * PODIUM_SPEED
+		local ex = math.cos(podiumAngle) * PODIUM_RADIUS
+		local ez = math.sin(podiumAngle) * PODIUM_RADIUS
+		local eye = center + Vector3.new(ex, PODIUM_HEIGHT, ez)
+		-- 시선 목표를 차 위 4u 높이로 → 시상대 전체가 화면에 담김
+		c.CFrame = CFrame.lookAt(eye, center + Vector3.new(0, 4, 0))
+	end)
+	podiumBound = true
+
+	-- podiumDuration 경과 후 자동 복귀 (RaceStateChanged{Idle} 신호보다 먼저 끝날 경우 안전망)
+	task.delay(PODIUM_DURATION, function()
+		if podiumMode then
+			unbindPodium()
+			podiumMode = false
+			ensureDefault()
+		end
+	end)
+end
+
 -- 카운트다운 수신: 3·2 → 회전, 1 → 복귀, 0(GO) → 안전망
 Remotes.Event("RaceCountdown").OnClientEvent:Connect(function(info)
 	local v = info and info.value
@@ -192,6 +287,16 @@ Remotes.Event("RaceStateChanged").OnClientEvent:Connect(function(info)
 	end
 end)
 
+-- RaceFinished: 주행 카메라 정리 (시상대 PodiumStart가 곧 이어지므로 즉시 Custom 전환)
 Remotes.Event("RaceFinished").OnClientEvent:Connect(function()
 	ensureDefault()
+end)
+
+-- 시상대 시네마틱 카메라 — PodiumStart 수신 시 시작
+-- payload: { results: {any}, top3: {any} }  (서버 RaceManager에서 발사)
+Remotes.Event("PodiumStart").OnClientEvent:Connect(function(payload)
+	if not payload then
+		return
+	end
+	startPodiumOrbit(payload)
 end)

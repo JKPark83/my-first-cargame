@@ -245,13 +245,14 @@ GameConfig.Race = {
 	trackCount = 6, -- 테마 트랙 종류 수 (Themes와 1:1 매핑)
 	maxPlayers = 8, -- 한 경주 최대 인원
 	minPlayers = 1, -- 경주 시작 최소 인원
-	lobbyCountdown = 15, -- 대기열에서 시작까지 카운트다운 (초)
+	lobbyCountdown = 5, -- 대기열에서 시작까지 카운트다운 (초)
 	laps = 2, -- 완주 랩 수 (테마에 lapCount가 없을 때의 폴백 기본값)
 	avgSpeed = 120, -- 트랙 길이↔랩타임 환산용 평균 주행속도(studs/sec) 기준값
 	targetRaceSeconds = 120, -- 트랙별 랩 수 자동 계산 목표 총 경주 시간 (초)
 	raceTimeLimit = 240, -- 경주 제한 시간 (초)
 	progressBroadcastInterval = 0.15, -- 실시간 순위/미니맵 갱신 주기 (초)
 	entryLoadTime = 1.4, -- 경주 진입 로딩 화면 최소 표시 시간(트랙 생성/순간이동 히치 마스킹, 초)
+	podiumDuration = 9, -- 시상식 연출 지속 시간 (초)
 }
 
 -- =====================================================================
@@ -323,6 +324,64 @@ GameConfig.Items = {
 		coneDot = 0.5, -- 전방 원뿔 정렬도(0~1, 클수록 정면만)
 		color = Color3.fromRGB(90, 190, 255),
 	},
+
+	-- 대시(버섯): 사용 시 본인 일시적 속도/가속 대폭 상승
+	mushroom = {
+		emoji = "🍄",
+		displayName = "대시",
+		speedMultiplier = 2.2, -- 최고속 배수
+		accelMultiplier = 2.4, -- 가속 배수
+		duration = 1.6, -- 지속 시간 (초)
+	},
+
+	-- 기름통: 차 뒤에 떨어뜨려 밟은 상대를 감속시킴
+	slick = {
+		emoji = "🛢️",
+		displayName = "기름통",
+		slowDuration = 2.0, -- 밟으면 감속 지속 시간 (초)
+		dropBackOffset = 9, -- 차 뒤로 떨어뜨리는 거리 (스터드)
+		life = 30, -- 자동 소멸 시간 (초)
+		color = Color3.fromRGB(40, 40, 55),
+	},
+
+	-- 방어막: 사용 시 일정 시간 동안 들어오는 공격 무효화
+	shield = {
+		emoji = "🛡️",
+		displayName = "방어막",
+		duration = 5.0, -- 방어막 지속 시간 (초)
+		color = Color3.fromRGB(120, 200, 255),
+	},
+
+	-- 번개: 본인보다 앞선 모든 사람(봇 제외) 레이서를 짧게 감속
+	lightning = {
+		emoji = "⚡",
+		displayName = "번개",
+		slowDuration = 2.2, -- 앞순위 인간 레이서 감속 시간 (초)
+		color = Color3.fromRGB(255, 230, 90),
+	},
+
+	-- 순위 기반 아이템 분배 풀 (rankPools 없으면 pool이 폴백으로 동작)
+	-- tier: front = 상위 30%, mid = 중위, back = 하위 40%
+	rankPools = {
+		front = { -- 상위권: 방어 위주
+			{ id = "shield", weight = 3 },
+			{ id = "banana", weight = 3 },
+			{ id = "balloon", weight = 1 },
+		},
+		mid = { -- 중위권: 균형
+			{ id = "banana", weight = 2 },
+			{ id = "rocket", weight = 2 },
+			{ id = "mushroom", weight = 2 },
+			{ id = "balloon", weight = 2 },
+			{ id = "slick", weight = 1 },
+		},
+		back = { -- 하위권: 가속+방해 위주
+			{ id = "rocket", weight = 3 },
+			{ id = "mushroom", weight = 2 },
+			{ id = "lightning", weight = 2 },
+			{ id = "slick", weight = 2 },
+		},
+	},
 }
 
 -- =====================================================================
@@ -341,9 +400,9 @@ GameConfig.Themes = {
 		displayName = "사탕나라 🍭",
 		emoji = "🍭",
 		targetLapSeconds = 22,
-		nodeCount = 16,
+		nodeCount = 19, -- +3 (곡률 증가)
 		road = Color3.fromRGB(255, 150, 185),
-		roadMaterial = Enum.Material.SmoothPlastic,
+		roadMaterial = Enum.Material.Asphalt, -- 노면 통일
 		wall = Color3.fromRGB(235, 110, 165),
 		railLeft = Color3.fromRGB(255, 90, 140),
 		railRight = Color3.fromRGB(255, 240, 248),
@@ -371,9 +430,9 @@ GameConfig.Themes = {
 		displayName = "과자나라 🍪",
 		emoji = "🍪",
 		targetLapSeconds = 25,
-		nodeCount = 14,
+		nodeCount = 18, -- +4 (곡률 증가)
 		road = Color3.fromRGB(120, 80, 45),
-		roadMaterial = Enum.Material.Sand,
+		roadMaterial = Enum.Material.Asphalt, -- 노면 통일
 		wall = Color3.fromRGB(160, 110, 65),
 		railLeft = Color3.fromRGB(89, 47, 19),
 		railRight = Color3.fromRGB(255, 235, 200),
@@ -401,9 +460,9 @@ GameConfig.Themes = {
 		displayName = "동물나라 🐾",
 		emoji = "🐾",
 		targetLapSeconds = 28,
-		nodeCount = 18,
+		nodeCount = 21, -- +3 (곡률 증가)
 		road = Color3.fromRGB(170, 140, 95),
-		roadMaterial = Enum.Material.Ground,
+		roadMaterial = Enum.Material.Asphalt, -- 노면 통일
 		wall = Color3.fromRGB(120, 80, 40),
 		railLeft = Color3.fromRGB(95, 60, 30),
 		railRight = Color3.fromRGB(235, 220, 180),
@@ -431,9 +490,9 @@ GameConfig.Themes = {
 		displayName = "바다나라 🐠",
 		emoji = "🐠",
 		targetLapSeconds = 32,
-		nodeCount = 16,
+		nodeCount = 20, -- +4 (곡률 증가)
 		road = Color3.fromRGB(30, 80, 120),
-		roadMaterial = Enum.Material.SmoothPlastic,
+		roadMaterial = Enum.Material.Asphalt, -- 노면 통일
 		wall = Color3.fromRGB(40, 110, 150),
 		railLeft = Color3.fromRGB(255, 110, 75),
 		railRight = Color3.fromRGB(150, 235, 255),
@@ -461,9 +520,9 @@ GameConfig.Themes = {
 		displayName = "우주나라 🚀",
 		emoji = "🚀",
 		targetLapSeconds = 36,
-		nodeCount = 14,
+		nodeCount = 17, -- +3 (곡률 증가)
 		road = Color3.fromRGB(28, 26, 55),
-		roadMaterial = Enum.Material.Neon,
+		roadMaterial = Enum.Material.Asphalt, -- 노면 통일
 		wall = Color3.fromRGB(60, 25, 100),
 		railLeft = Color3.fromRGB(0, 190, 255),
 		railRight = Color3.fromRGB(180, 90, 255),
@@ -491,9 +550,9 @@ GameConfig.Themes = {
 		displayName = "용암나라 🌋",
 		emoji = "🌋",
 		targetLapSeconds = 40,
-		nodeCount = 20,
+		nodeCount = 23, -- +3 (곡률 증가)
 		road = Color3.fromRGB(40, 32, 28),
-		roadMaterial = Enum.Material.Slate,
+		roadMaterial = Enum.Material.Asphalt, -- 노면 통일
 		wall = Color3.fromRGB(55, 38, 28),
 		railLeft = Color3.fromRGB(255, 90, 0),
 		railRight = Color3.fromRGB(255, 170, 40),
@@ -528,13 +587,13 @@ GameConfig.Bots = {
 	difficulty = "medium",
 	carId = "city_hatch", -- 봇이 모는 차(외형 전용, 주행은 키네매틱)
 	-- 난이도 "중간": 고무줄 기준은 "사람 선두"라 사람이 뒤처지면 봇도 느려져 충분히 이길 수 있다.
-	baseSpeed = 78, -- 사람과 진행도가 같을 때의 기본 속도(studs/sec)
-	speedVariance = 8, -- 봇별 고정 속도 편차(±)
-	rubberbandGain = 3.0, -- 사람 선두와의 진행 차이(체크포인트)당 속도 보정
-	rubberbandMin = -16, -- 사람보다 앞설 때 최대 감속(사람이 따라잡게)
-	rubberbandMax = 24, -- 사람보다 뒤처질 때 최대 가속(접전 유지)
-	minSpeed = 55,
-	maxSpeed = 125,
+	baseSpeed = 100, -- 사람과 진행도가 같을 때의 기본 속도(studs/sec)
+	speedVariance = 6, -- 봇별 고정 속도 편차(±)
+	rubberbandGain = 2.5, -- 사람 선두와의 진행 차이(체크포인트)당 속도 보정
+	rubberbandMin = -8, -- 사람보다 앞설 때 최대 감속(사람이 따라잡게)
+	rubberbandMax = 20, -- 사람보다 뒤처질 때 최대 가속(접전 유지)
+	minSpeed = 75,
+	maxSpeed = 150,
 	names = { "번개", "초코", "별이", "토토", "쌩쌩", "구름", "단비", "뭉치", "하트", "코코" },
 	bodyColors = {
 		{ 255, 95, 95 },
@@ -574,6 +633,10 @@ GameConfig.Audio = {
 	boostPitchBonus = 0.25, -- 부스트 시 추가 피치
 	rollOffMinDistance = 12, -- 이 거리 안에서는 최대 볼륨
 	rollOffMaxDistance = 240, -- 이 거리 밖에서는 안 들림
+	-- 카운트다운 비프음: 3·2·1 각 숫자마다 재생(whooshIds와 동일하게 "첫 로드 성공 id" 선택, 실패 시 무음)
+	countdownBeepIds = { 3114390498, 9118823106, 138081500 },
+	-- 카운트다운 GO 효과음: 출발 신호 재생
+	countdownGoIds = { 1846160621, 9118823418, 138090596 },
 }
 
 -- =====================================================================
@@ -607,8 +670,11 @@ GameConfig.SpeedFX = {
 	maxFovAdd = 18, -- 최고속에서 추가되는 FOV(70→88)
 	accelFovAdd = 9, -- "가속 중"일 때 추가되는 FOV(공간 뒤틀림 강조)
 	boostFovPunch = 12, -- 부스트 순간 FOV 펀치(최대 ~100)
-	blurMax = 10, -- 최고속 모션블러 크기
+	blurMax = 0, -- 일반 속도 모션블러 비활성(로켓 DOF로 대체)
 	blurBoostExtra = 12, -- 부스트 시 추가 모션블러
+	rocketDofFarIntensity = 0.75, -- 로켓 중 원경 DOF 강도(내 차 선명 + 원경 흐림)
+	rocketDofInFocusRadius = 22, -- 로켓 중 DOF 초점 반경(studs)
+	rocketTunnelVignette = 0.85, -- 로켓 중 터널 비네팅 강도(흰빛 연출)
 	shakeMax = 0.22, -- 최고속 카메라 흔들림(studs)
 	shakeBoostExtra = 0.45, -- 부스트 시 추가 흔들림
 	vignetteMax = 0.42, -- 최고속 비네팅 진하기(0~1)

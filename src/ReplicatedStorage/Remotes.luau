@@ -41,6 +41,7 @@ local EVENT_NAMES = {
 	"RaceProgress", -- 실시간 순위/차량 위치(미니맵 HUD)
 	"RaceCountdown", -- 경주 시작 카운트다운
 	"RaceFinished", -- 경주 결과(순위/보상)
+	"PodiumStart", -- 시상대 연출 시작 (results, top3) 서버→클라
 	"LeaderboardUpdated", -- 글로벌 최고기록 순위 갱신
 	"Notify", -- 일반 알림 메시지
 	"OpenGarageUI", -- 차량 선택 패드 진입 → 클라이언트 차고 UI 열기

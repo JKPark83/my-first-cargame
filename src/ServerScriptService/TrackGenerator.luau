@@ -24,7 +24,7 @@ local ROAD_WIDTH = 48
 local ROAD_THICKNESS = 2
 local WALL_HEIGHT = 5 -- 가드레일(충돌 벽) 높이
 local RAIL_HEIGHT = 0.6 -- 벽 위 색 레일 두께
-local SAMPLES_PER_SEGMENT = 14 -- 노드 사이 보간 샘플 수 (높을수록 매끄러움)
+local SAMPLES_PER_SEGMENT = 20 -- 노드 사이 보간 샘플 수 (높을수록 매끄러움)
 local CHECKPOINT_EVERY = 1 -- 모든 경로 노드를 체크포인트로 사용
 local DEFAULT_NODE_COUNT = 16 -- 테마에 nodeCount가 없을 때 기본 제어점 수
 local DECOR_SPACING = 130 -- 장식 소품 간격(스터드) — 트랙 길이에 비례해 개수 산정
@@ -165,7 +165,7 @@ local function makeRoadSegment(a: Vector3, b: Vector3, parent: Instance, index: 
 		return
 	end
 	local look = CFrame.lookAt(mid, b)
-	local segLen = length + 1 -- 세그먼트끼리 살짝 겹쳐 틈 제거
+	local segLen = length + 2 -- 세그먼트끼리 살짝 겹쳐 틈 제거
 
 	-- 도로 바닥
 	local road = Instance.new("Part")

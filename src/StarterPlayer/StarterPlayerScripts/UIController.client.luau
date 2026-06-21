@@ -1317,11 +1317,13 @@ RunService.RenderStepped:Connect(function()
 		return
 	end
 	local now = workspace:GetServerTimeNow()
-	local boostEnd = seat:GetAttribute("BoostEndTime") :: number?
-	local slowEnd = seat:GetAttribute("SlowEndTime") :: number?
-	local rocketEnd = seat:GetAttribute("RocketEndTime") :: number?
-	local spinEnd = seat:GetAttribute("SpinEndTime") :: number?
-	local freezeEnd = seat:GetAttribute("FreezeEndTime") :: number?
+	local boostEnd    = seat:GetAttribute("BoostEndTime")    :: number?
+	local slowEnd     = seat:GetAttribute("SlowEndTime")     :: number?
+	local rocketEnd   = seat:GetAttribute("RocketEndTime")   :: number?
+	local spinEnd     = seat:GetAttribute("SpinEndTime")     :: number?
+	local freezeEnd   = seat:GetAttribute("FreezeEndTime")   :: number?
+	local shieldEnd   = seat:GetAttribute("ShieldEndTime")   :: number? -- [계약 C] 방어막
+	local boostItemEnd = seat:GetAttribute("BoostItemEndTime") :: number? -- [계약 C] 버섯 대시
 	if freezeEnd and now < freezeEnd then
 		statusIndicator.Visible = true
 		statusIndicator.Text = "💧 갇힘!"
@@ -1334,6 +1336,16 @@ RunService.RenderStepped:Connect(function()
 		statusIndicator.Visible = true
 		statusIndicator.Text = "🚀 로켓!"
 		statusIndicator.TextColor3 = Color3.fromRGB(255, 120, 90)
+	elseif boostItemEnd and now < boostItemEnd then
+		-- [계약 C] 버섯 대시 효과 중
+		statusIndicator.Visible = true
+		statusIndicator.Text = "🍄 대시!"
+		statusIndicator.TextColor3 = Color3.fromRGB(255, 160, 50)
+	elseif shieldEnd and now < shieldEnd then
+		-- [계약 C] 방어막 활성 중 (부스트패드보다 우선 표시)
+		statusIndicator.Visible = true
+		statusIndicator.Text = "🛡️ 방어막!"
+		statusIndicator.TextColor3 = Color3.fromRGB(120, 200, 255)
 	elseif boostEnd and now < boostEnd then
 		statusIndicator.Visible = true
 		statusIndicator.Text = "🚀 부스트!"
@@ -1351,9 +1363,14 @@ end)
 -- 아이템 슬롯 HUD (박스 획득 → [Q]/버튼으로 사용)
 -- =====================================================================
 local ITEM_INFO: { [string]: { emoji: string, name: string, color: Color3 } } = {
-	banana = { emoji = "🍌", name = "바나나", color = Color3.fromRGB(255, 230, 70) },
-	rocket = { emoji = "🚀", name = "로켓", color = Color3.fromRGB(255, 120, 90) },
-	balloon = { emoji = "💧", name = "물풍선", color = Color3.fromRGB(90, 190, 255) },
+	banana   = { emoji = "🍌", name = "바나나",  color = Color3.fromRGB(255, 230, 70) },
+	rocket   = { emoji = "🚀", name = "로켓",    color = Color3.fromRGB(255, 120, 90) },
+	balloon  = { emoji = "💧", name = "물풍선",  color = Color3.fromRGB(90, 190, 255) },
+	-- [계약 C] 신규 아이템 4종 UI 정보
+	mushroom  = { emoji = "🍄", name = "대시",    color = Color3.fromRGB(255, 160, 50)  },
+	slick     = { emoji = "🛢️", name = "기름통",  color = Color3.fromRGB(100, 120, 140) },
+	shield    = { emoji = "🛡️", name = "방어막",  color = Color3.fromRGB(120, 200, 255) },
+	lightning = { emoji = "⚡", name = "번개",    color = Color3.fromRGB(255, 230, 90)  },
 }
 local currentItem: string? = nil
 
@@ -1679,6 +1696,12 @@ local function setLobbyButtonsVisible(visible: boolean)
 end
 
 -- 경주 상태 변화: 경주 시작 시 대기열 상태/패널/버튼 정리
+-- [계약 F] 시상대 hideCeremony 포워드 선언
+--   실제 구현은 RaceFinished 이후 Ceremony 섹션에서 대입됨.
+--   RaceStateChanged 클로저가 이 변수를 upvalue로 캡처하므로
+--   나중에 대입한 값을 자동으로 참조한다.
+local hideCeremony: () -> () = function() end
+
 Remotes.Event("RaceStateChanged").OnClientEvent:Connect(function(info)
 	if info.state == "Racing" then
 		inQueue = false
@@ -1705,6 +1728,7 @@ Remotes.Event("RaceStateChanged").OnClientEvent:Connect(function(info)
 		currentItem = nil
 		refreshItemSlot()
 		clearMinimap()
+		hideCeremony() -- [계약 F] Idle 복귀 시 시상대 Ceremony UI 숨김
 	end
 end)
 
@@ -1750,13 +1774,63 @@ Remotes.Event("RaceProgress").OnClientEvent:Connect(function(info)
 	end
 end)
 
+-- =====================================================================
+-- [계약 E] 카운트다운 비프/출발 사운드
+--   MusicController의 loadFirstPlayable 패턴을 인라인 복사.
+--   런타임에 첫 로드 성공 id를 사용; 모두 실패하면 무음.
+-- =====================================================================
+local beepSound = Instance.new("Sound")
+beepSound.Volume = 0.8
+beepSound.Parent = workspace
+
+local goSound = Instance.new("Sound")
+goSound.Volume = 0.9
+goSound.Parent = workspace
+
+local function loadFirstPlayable(sound: Sound, ids: { number })
+	for _, id in ipairs(ids) do
+		sound.SoundId = "rbxassetid://" .. tostring(id)
+		if not sound.IsLoaded then
+			local loaded = false
+			local conn = sound.Loaded:Connect(function()
+				loaded = true
+			end)
+			local waited = 0
+			while not loaded and waited < 30 do
+				task.wait(0.1)
+				waited += 1
+			end
+			conn:Disconnect()
+		end
+		if sound.IsLoaded then
+			return -- 로드 성공, 이 id 사용
+		end
+	end
+	-- 모두 실패: 무음 유지
+end
+
+task.spawn(function()
+	loadFirstPlayable(beepSound, (GameConfig.Audio and GameConfig.Audio.countdownBeepIds) or {})
+end)
+task.spawn(function()
+	loadFirstPlayable(goSound, (GameConfig.Audio and GameConfig.Audio.countdownGoIds) or {})
+end)
+
 Remotes.Event("RaceCountdown").OnClientEvent:Connect(function(info)
 	raceLoadSeq += 1 -- 진행 중 로딩 타임아웃 무효화
 	hideLoading() -- 안전망: 카운트다운 시작 시 로딩이 남아있으면 해제
 	if info.value and info.value > 0 then
 		flashBig(tostring(info.value))
+		-- [계약 E] 비프음 재생 (경주 참가 중일 때: 미니맵 표시 = 참가 중)
+		if minimap.Visible then
+			pcall(function() beepSound:Play() end)
+		end
 	else
 		flashBig("GO!")
+		-- [계약 E] 출발 사운드 재생
+		if minimap.Visible then
+			pcall(function() goSound:Play() end)
+		end
 	end
 end)
 
@@ -1764,6 +1838,219 @@ Remotes.Event("RaceFinished").OnClientEvent:Connect(function(info)
 	if info.results then
 		showResults(info.results)
 	end
+end)
+
+-- =====================================================================
+-- [계약 F] 시상대 Ceremony UI
+--   PodiumStart{results, top3} 수신 → 3단 시상대 + 🥇🥈🥉 + 이름 + 축하문구
+--   TweenService 줌인, 색종이 이모지 연출, 내 순위 강조색(120,255,160).
+--   RaceStateChanged{state="Idle"} 수신 시 hideCeremony()로 숨김.
+-- =====================================================================
+local ceremonyGui = make("ScreenGui", {
+	Name = "CeremonyUI",
+	ResetOnSpawn = false,
+	DisplayOrder = 60,
+	IgnoreGuiInset = true,
+	ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+}, playerGui)
+
+-- 포워드 선언한 hideCeremony 변수에 실제 구현 대입
+-- (RaceStateChanged 클로저가 이미 이 변수를 upvalue로 캡처하고 있으므로
+--  이후 이벤트 발화 시 실제 함수가 호출된다)
+hideCeremony = function()
+	for _, c in ipairs(ceremonyGui:GetChildren()) do
+		c:Destroy()
+	end
+end
+
+local CEREMONY_MEDALS      = { "🥇", "🥈", "🥉" }
+local CEREMONY_BLOCK_COLORS = {
+	[1] = Color3.fromRGB(215, 175, 40),  -- 1등: 금
+	[2] = Color3.fromRGB(160, 175, 190), -- 2등: 은
+	[3] = Color3.fromRGB(180, 120, 70),  -- 3등: 동
+}
+local CEREMONY_CONGRATS = {
+	[1] = "축하합니다! 🎉",
+	[2] = "잘하셨습니다! 👍",
+	[3] = "훌륭해요! 🌟",
+}
+local CONFETTI_LIST = { "🎉", "🎊", "✨", "⭐", "🌟", "🎈", "🎆", "🎇" }
+
+local function showCeremony(info: any)
+	hideCeremony() -- 기존 Ceremony UI 정리
+
+	local results: { any } = (type(info) == "table" and info.results) or {}
+	local top3: { any }   = (type(info) == "table" and info.top3)    or {}
+
+	-- 반투명 배경 오버레이
+	make("Frame", {
+		Size = UDim2.fromScale(1, 1),
+		BackgroundColor3 = Color3.fromRGB(5, 8, 20),
+		BackgroundTransparency = 0.35,
+		ZIndex = 1,
+	}, ceremonyGui)
+
+	-- 색종이(이모지) 장식 — 화면 상단에 흩뿌림
+	local CONFETTI_COUNT = 14
+	for i = 1, CONFETTI_COUNT do
+		local emoji = CONFETTI_LIST[((i - 1) % #CONFETTI_LIST) + 1]
+		make("TextLabel", {
+			Size = UDim2.new(0, 38, 0, 38),
+			Position = UDim2.new((i - 1) / CONFETTI_COUNT, math.random(-8, 8), 0, math.random(4, 52)),
+			BackgroundTransparency = 1,
+			Text = emoji,
+			TextScaled = true,
+			Font = Enum.Font.GothamBold,
+			ZIndex = 2,
+		}, ceremonyGui)
+	end
+
+	-- 중앙 시상대 카드
+	--   시작: 60% 크기(ClipsDescendants로 잘림) → TweenService로 줌인
+	local CARD_W, CARD_H = 520, 410
+	local card = make("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.new(0, math.floor(CARD_W * 0.6), 0, math.floor(CARD_H * 0.6)),
+		BackgroundColor3 = Color3.fromRGB(16, 20, 32),
+		BackgroundTransparency = 0,
+		ZIndex = 3,
+		ClipsDescendants = true,
+	}, ceremonyGui)
+	corner(18, card)
+	make("UIStroke", { Color = Color3.fromRGB(245, 220, 90), Thickness = 3 }, card)
+
+	-- 타이틀
+	make("TextLabel", {
+		Size = UDim2.new(1, 0, 0, 54),
+		Position = UDim2.new(0, 0, 0, 6),
+		BackgroundTransparency = 1,
+		Text = "🏆 경주 시상식! 🏆",
+		TextColor3 = Color3.fromRGB(245, 220, 90),
+		Font = Enum.Font.GothamBlack,
+		TextScaled = true,
+		ZIndex = 4,
+	}, card)
+
+	-- 1등 축하 문구
+	local winner = top3[1]
+	local winnerIsMe = winner and (winner.userId == player.UserId)
+	local congratsText = (winnerIsMe and "🎉 " or "") .. CEREMONY_CONGRATS[1]
+		.. "  " .. (winner and string.sub(tostring(winner.name or "?"), 1, 12) or "")
+	make("TextLabel", {
+		Size = UDim2.new(1, -20, 0, 32),
+		Position = UDim2.new(0, 10, 0, 63),
+		BackgroundTransparency = 1,
+		Text = congratsText,
+		TextColor3 = winnerIsMe and Color3.fromRGB(120, 255, 160) or Color3.fromRGB(255, 245, 180),
+		Font = Enum.Font.GothamBold,
+		TextScaled = true,
+		ZIndex = 4,
+	}, card)
+
+	-- 3단 시상대 계단
+	--   화면 배치: 2등(좌·중) / 1등(중앙·높음) / 3등(우·낮음)
+	local SCREEN_ORDER = { 2, 1, 3 }
+	local BLOCK_H = { [1] = 148, [2] = 106, [3] = 74 } -- 등수별 블록 픽셀 높이
+	local BLOCK_W = 140
+	local GAP = 14
+	local PODIUM_BOTTOM_Y = CARD_H - 14  -- 블록 하단 Y(카드 기준)
+	-- 열 X 시작 위치: [1]=좌(2등), [2]=중(1등), [3]=우(3등)
+	local COL_XS = {
+		GAP,
+		GAP + BLOCK_W + GAP,
+		GAP + (BLOCK_W + GAP) * 2,
+	}
+
+	for col = 1, 3 do
+		local place = SCREEN_ORDER[col]
+		local r = top3[place]
+		local isMe = r and (r.userId == player.UserId)
+		local bh = BLOCK_H[place]
+		local by = PODIUM_BOTTOM_Y - bh  -- 블록 상단 Y(카드 기준)
+
+		-- 시상대 블록
+		local block = make("Frame", {
+			Size = UDim2.new(0, BLOCK_W, 0, bh),
+			Position = UDim2.new(0, COL_XS[col], 0, by),
+			BackgroundColor3 = CEREMONY_BLOCK_COLORS[place],
+			ZIndex = 4,
+		}, card)
+		corner(8, block)
+		make("UIStroke", {
+			Color = isMe and Color3.fromRGB(120, 255, 160) or Color3.fromRGB(255, 255, 255),
+			Thickness = isMe and 2.5 or 1,
+			Transparency = 0.3,
+		}, block)
+
+		-- 메달 이모지 (블록 바로 위, card 기준 절대 위치)
+		make("TextLabel", {
+			Size = UDim2.new(0, BLOCK_W, 0, 44),
+			Position = UDim2.new(0, COL_XS[col], 0, by - 46),
+			BackgroundTransparency = 1,
+			Text = CEREMONY_MEDALS[place],
+			TextScaled = true,
+			Font = Enum.Font.GothamBold,
+			ZIndex = 4,
+		}, card)
+
+		-- 이름 (블록 내부 상단)
+		make("TextLabel", {
+			Size = UDim2.new(0, BLOCK_W - 8, 0, 28),
+			Position = UDim2.new(0, 4, 0, 6),
+			BackgroundTransparency = 1,
+			Text = r and string.sub(tostring(r.name or "?"), 1, 10) or "-",
+			TextColor3 = isMe and Color3.fromRGB(120, 255, 160) or Color3.fromRGB(245, 250, 255),
+			Font = Enum.Font.GothamBold,
+			TextScaled = true,
+			ZIndex = 5,
+		}, block)
+
+		-- 등수 텍스트 (이름 아래)
+		make("TextLabel", {
+			Size = UDim2.new(0, BLOCK_W - 8, 0, 22),
+			Position = UDim2.new(0, 4, 0, 36),
+			BackgroundTransparency = 1,
+			Text = tostring(place) .. "등",
+			TextColor3 = Color3.fromRGB(240, 245, 255),
+			Font = Enum.Font.GothamMedium,
+			TextScaled = true,
+			ZIndex = 5,
+		}, block)
+	end
+
+	-- 내 순위 (top3 밖이면 카드 하단에 별도 강조 표시)
+	local myPlace: number? = nil
+	for _, r in ipairs(results) do
+		if r.userId == player.UserId then
+			myPlace = r.place
+			break
+		end
+	end
+	if myPlace and myPlace > 3 then
+		make("TextLabel", {
+			Size = UDim2.new(1, -20, 0, 26),
+			Position = UDim2.new(0, 10, 1, -32),
+			BackgroundTransparency = 1,
+			Text = ("⭐ 내 순위: %d등"):format(myPlace),
+			TextColor3 = Color3.fromRGB(120, 255, 160),
+			Font = Enum.Font.GothamBold,
+			TextScaled = true,
+			ZIndex = 4,
+		}, card)
+	end
+
+	-- TweenService 줌인 (Back Easing = 살짝 튀어나오는 경쾌한 느낌)
+	TweenService:Create(
+		card,
+		TweenInfo.new(0.55, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+		{ Size = UDim2.new(0, CARD_W, 0, CARD_H) }
+	):Play()
+end
+
+-- [계약 F] PodiumStart 이벤트 핸들러
+Remotes.Event("PodiumStart").OnClientEvent:Connect(function(info)
+	showCeremony(info)
 end)
 
 -- 글로벌 순위 갱신 수신 (패널이 열려있으면 반영)

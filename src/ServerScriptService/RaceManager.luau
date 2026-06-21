@@ -488,14 +488,32 @@ local function racerFromHit(hit: BasePart): RacerState?
 	return racers[userId]
 end
 
--- 가중치 랜덤으로 아이템 1개 선택
-local function pickRandomItem(): string
-	local pool = GameConfig.Items.pool
-	local total = 0
-	for _, e in ipairs(pool) do
-		total += e.weight
+-- 순위 기반 가중치 랜덤으로 아이템 1개 선택 (D)
+-- rank: 현재 레이서 순위(1=1위), total: 전체 참가수
+local function pickRandomItem(rank: number, total: number): string
+	-- rankPools 티어 결정: 상위 30% → front, 하위 40% → back, 나머지 → mid
+	local rankPools = (GameConfig.Items :: any).rankPools
+	local pool: { { id: string, weight: number } }? = nil
+	if rankPools then
+		local frontCut = math.ceil(total * 0.3)
+		local backCut  = math.ceil(total * 0.6)
+		if rank <= frontCut then
+			pool = rankPools.front
+		elseif rank > backCut then
+			pool = rankPools.back
+		else
+			pool = rankPools.mid
+		end
 	end
-	local r = math.random() * total
+	-- rankPools 없거나 tier 미탐색 시 기존 pool 폴백
+	if not pool then
+		pool = GameConfig.Items.pool
+	end
+	local totalWeight = 0
+	for _, e in ipairs(pool) do
+		totalWeight += e.weight
+	end
+	local r = math.random() * totalWeight
 	local acc = 0
 	for _, e in ipairs(pool) do
 		acc += e.weight
@@ -516,7 +534,7 @@ local function setBoxVisible(box: BasePart, visible: boolean)
 	end
 end
 
--- 아이템 박스 통과 처리: 비어 있으면 랜덤 지급 + 박스 일시 비활성화 후 재생성
+-- 아이템 박스 통과 처리: 비어 있으면 순위 기반 랜덤 지급 + 박스 일시 비활성화 후 재생성 (D)
 local function onItemBoxTouched(box: BasePart, racer: RacerState)
 	if not box:GetAttribute("Active") then
 		return
@@ -524,12 +542,30 @@ local function onItemBoxTouched(box: BasePart, racer: RacerState)
 	if racer.item then
 		return -- 이미 보유 중이면 받지 않음
 	end
+	-- 봇 nil 가드: 봇은 아이템 UI가 없으므로 지급하지 않음 (D)
+	if racer.isBot then
+		return
+	end
 	box:SetAttribute("Active", false)
 	setBoxVisible(box, false)
 
-	local itemId = pickRandomItem()
+	-- 현재 순위를 progress 기준으로 즉석 계산해 pickRandomItem에 전달 (D)
+	local myRank = 1
+	local total = 0
+	for _, r in pairs(racers) do
+		total += 1
+		if r.progress > racer.progress then
+			myRank += 1
+		end
+	end
+	total = math.max(total, 1)
+
+	local itemId = pickRandomItem(myRank, total)
 	racer.item = itemId
-	Remotes.Event("ItemUpdated"):FireClient(racer.player, itemId)
+	-- racer.player는 봇 가드로 여기서는 반드시 non-nil
+	if racer.player then
+		Remotes.Event("ItemUpdated"):FireClient(racer.player, itemId)
+	end
 
 	task.delay(GameConfig.Items.boxRespawnTime, function()
 		if box.Parent and state == "Racing" then
@@ -590,20 +626,106 @@ local function dropBanana(racer: RacerState)
 		if not victim or not victim.car or not victim.car.PrimaryPart then
 			return
 		end
+		-- 봇은 아이템 피격 면역 (C)
+		if victim.isBot then
+			return
+		end
 		local now = workspace:GetServerTimeNow()
 		-- 투하 직후 본인 면역
-		if victim.player.UserId == racer.player.UserId and (now - placedAt) < cfg.armDelay then
+		if racer.player and victim.player and victim.player.UserId == racer.player.UserId and (now - placedAt) < cfg.armDelay then
+			return
+		end
+		-- 방어막(ShieldEndTime) 유효 시 피격 스킵 (C)
+		local shieldEnd = victim.car.PrimaryPart:GetAttribute("ShieldEndTime")
+		if typeof(shieldEnd) == "number" and now < shieldEnd then
 			return
 		end
 		consumed = true
 		victim.car.PrimaryPart:SetAttribute("SpinEndTime", now + cfg.spinDuration)
-		Remotes.Event("ItemEffect"):FireAllClients({ kind = "banana", userId = victim.player.UserId })
+		if victim.player then
+			Remotes.Event("ItemEffect"):FireAllClients({ kind = "banana", userId = victim.player.UserId })
+		end
 		banana:Destroy()
 	end)
 
 	task.delay(cfg.life, function()
 		if banana.Parent then
 			banana:Destroy()
+		end
+	end)
+end
+
+-- 기름통: 차 뒤에 떨어뜨려 밟은 상대를 감속시킴. dropBanana 패턴 복제 (C)
+local function dropSlick(racer: RacerState)
+	local car = racer.car
+	if not car or not car.PrimaryPart then
+		return
+	end
+	local cfg = (GameConfig.Items :: any).slick
+	local seat = car.PrimaryPart
+	local dropPos = (seat.CFrame * CFrame.new(0, -0.3, cfg.dropBackOffset)).Position
+
+	local slick = Instance.new("Part")
+	slick.Name = "OilSlick"
+	slick.Shape = Enum.PartType.Cylinder
+	slick.Anchored = true
+	slick.CanCollide = false
+	slick.Size = Vector3.new(0.4, 6, 6)
+	slick.Color = cfg.color
+	slick.Material = Enum.Material.SmoothPlastic
+	slick.Transparency = 0.25
+	slick.CFrame = CFrame.new(dropPos) * CFrame.Angles(0, 0, math.pi / 2)
+	slick.Parent = itemParent()
+
+	local bb = Instance.new("BillboardGui")
+	bb.Size = UDim2.fromOffset(42, 42)
+	bb.StudsOffset = Vector3.new(0, 1.8, 0)
+	bb.Adornee = slick
+	bb.Parent = slick
+	local lbl = Instance.new("TextLabel")
+	lbl.Size = UDim2.fromScale(1, 1)
+	lbl.BackgroundTransparency = 1
+	lbl.Text = cfg.emoji
+	lbl.TextScaled = true
+	lbl.Parent = bb
+
+	local lastHit: { [number]: number } = {} -- userId → 마지막 피격 시각(반복 발화 디바운스)
+	slick.Touched:Connect(function(hit)
+		if state ~= "Racing" then
+			return
+		end
+		local victim = racerFromHit(hit)
+		if not victim or not victim.car or not victim.car.PrimaryPart then
+			return
+		end
+		-- 봇은 아이템 피격 면역 (C)
+		if victim.isBot then
+			return
+		end
+		-- 본인 면역
+		if victim.userId == racer.userId then
+			return
+		end
+		local now = workspace:GetServerTimeNow()
+		-- 방어막(ShieldEndTime) 유효 시 피격 스킵 (C)
+		local shieldEnd = victim.car.PrimaryPart:GetAttribute("ShieldEndTime")
+		if typeof(shieldEnd) == "number" and now < shieldEnd then
+			return
+		end
+		-- 디바운스: Touched는 물리 스텝마다 반복 발화하므로 감속 지속시간 내 재발화 차단
+		if (lastHit[victim.userId] or 0) + cfg.slowDuration > now then
+			return
+		end
+		lastHit[victim.userId] = now
+		victim.car.PrimaryPart:SetAttribute("SlowEndTime", now + cfg.slowDuration)
+		if victim.player then
+			notify(victim.player, "🛢️ 기름통을 밟았어요! 속도가 느려져요!")
+		end
+	end)
+
+	task.delay(cfg.life, function()
+		if slick.Parent then
+			slick:Destroy()
 		end
 	end)
 end
@@ -682,19 +804,84 @@ local function useBalloon(racer: RacerState): boolean
 	local cfg = GameConfig.Items.balloon
 	local target = findFreezeTarget(racer)
 	if not target or not target.car or not target.car.PrimaryPart then
-		notify(racer.player, "앞에 맞출 상대가 없어요!")
+		if racer.player then
+			notify(racer.player, "앞에 맞출 상대가 없어요!")
+		end
 		return false
 	end
 	local now = workspace:GetServerTimeNow()
+	-- 방어막(ShieldEndTime) 유효 시 피격 스킵 (C)
+	local shieldEnd = target.car.PrimaryPart:GetAttribute("ShieldEndTime")
+	if typeof(shieldEnd) == "number" and now < shieldEnd then
+		if racer.player then
+			notify(racer.player, "상대방의 방어막이 물풍선을 막았어요!")
+		end
+		return false
+	end
 	target.car.PrimaryPart:SetAttribute("FreezeEndTime", now + cfg.freezeDuration)
 	spawnFreezeBubble(target, cfg.freezeDuration)
 	Remotes.Event("ItemEffect"):FireAllClients({
 		kind = "balloon",
-		fromUserId = racer.player.UserId,
-		userId = target.player.UserId,
+		fromUserId = racer.player and racer.player.UserId or 0,
+		userId = target.player and target.player.UserId or 0,
 	})
-	notify(target.player, "💧 물풍선에 맞았어요! 잠시 갇힘!")
+	if target.player then
+		notify(target.player, "💧 물풍선에 맞았어요! 잠시 갇힘!")
+	end
 	return true
+end
+
+-- 버섯(대시): 본인 속도를 잠깐 폭발적으로 높임 (C)
+local function useMushroom(racer: RacerState)
+	local car = racer.car
+	if not car or not car.PrimaryPart then
+		return
+	end
+	local cfg = (GameConfig.Items :: any).mushroom
+	local now = workspace:GetServerTimeNow()
+	car.PrimaryPart:SetAttribute("BoostItemEndTime", now + cfg.duration)
+	Remotes.Event("ItemEffect"):FireAllClients({ kind = "mushroom", userId = racer.userId })
+end
+
+-- 방어막: 본인에게 일정 시간 공격 무효화 방어막 부여 (C)
+local function useShield(racer: RacerState)
+	local car = racer.car
+	if not car or not car.PrimaryPart then
+		return
+	end
+	local cfg = (GameConfig.Items :: any).shield
+	local now = workspace:GetServerTimeNow()
+	car.PrimaryPart:SetAttribute("ShieldEndTime", now + cfg.duration)
+	Remotes.Event("ItemEffect"):FireAllClients({ kind = "shield", userId = racer.userId })
+end
+
+-- 번개: 본인보다 앞선 모든 사람 레이서를 짧게 감속 (C, 봇 제외)
+local function useLightning(racer: RacerState)
+	local cfg = (GameConfig.Items :: any).lightning
+	local now = workspace:GetServerTimeNow()
+	local myProgress = racer.progress
+	local hitCount = 0
+	for _, other in pairs(racers) do
+		-- 봇 제외, 본인 제외, 앞선(더 많이 진행한) 사람 레이서만 (C)
+		if not other.isBot and other.userId ~= racer.userId and other.progress > myProgress then
+			if other.car and other.car.PrimaryPart then
+				-- 방어막(ShieldEndTime) 유효 시 스킵 (C)
+				local shieldEnd = other.car.PrimaryPart:GetAttribute("ShieldEndTime")
+				if typeof(shieldEnd) == "number" and now < shieldEnd then
+					continue
+				end
+				other.car.PrimaryPart:SetAttribute("SlowEndTime", now + cfg.slowDuration)
+				if other.player then
+					notify(other.player, "⚡ 번개 공격! 잠시 속도가 느려졌어요!")
+				end
+				hitCount += 1
+			end
+		end
+	end
+	Remotes.Event("ItemEffect"):FireAllClients({ kind = "lightning", userId = racer.userId })
+	if hitCount == 0 and racer.player then
+		notify(racer.player, "⚡ 번개! (앞에 맞출 사람 레이서가 없어요)")
+	end
 end
 
 -- 보유 아이템 사용 요청 처리 (클라 RequestUseItem → Main.server에서 호출)
@@ -721,6 +908,18 @@ function RaceManager.useItem(player: Player)
 		useRocket(racer)
 	elseif item == "balloon" then
 		consumed = useBalloon(racer)
+	elseif item == "mushroom" then
+		-- 버섯 대시: 본인 가속 (C)
+		useMushroom(racer)
+	elseif item == "slick" then
+		-- 기름통: 뒤에 투하 (C)
+		dropSlick(racer)
+	elseif item == "shield" then
+		-- 방어막: 본인 방어 (C)
+		useShield(racer)
+	elseif item == "lightning" then
+		-- 번개: 앞선 사람 레이서 전체 감속 (C)
+		useLightning(racer)
 	end
 
 	if consumed then
@@ -982,12 +1181,14 @@ function RaceManager.endRace()
 		if not racer.finished and racer.player then
 			DataManager.recordRace(racer.player, false)
 		end
+		-- userId 포함: 시상대 클라이언트가 차량 식별에 사용 (F)
 		table.insert(results, {
 			name = racer.name,
 			isBot = racer.isBot,
 			place = racer.place,
 			finished = racer.finished,
 			time = racer.finishTime,
+			userId = racer.userId,
 		})
 	end
 
@@ -1000,13 +1201,50 @@ function RaceManager.endRace()
 
 	Remotes.Event("RaceFinished"):FireAllClients({ results = results })
 
-	-- 결과 표시 후 라운지 복귀
-	task.wait(5)
-	-- 테마 조명 → 라운지 기본 조명 복원(라운지로 돌아가기 전에 복원해 한 프레임도 테마 조명이 안 보이게)
+	-- 시상대 이벤트: top3 추출 후 클라에 시네마틱 시상식 알림 (F)
+	local top3 = { results[1], results[2], results[3] }
+	Remotes.Event("PodiumStart"):FireAllClients({ results = results, top3 = top3 })
+
+	-- podiumDuration 동안 top3 차량 Anchored 고정 + 제자리 회전(F, best-effort, nil 가드)
+	local podiumDuration = (GameConfig.Race :: any).podiumDuration or 9
+	local podiumConn: RBXScriptConnection? = nil
+	do
+		-- top3 항목에서 racer 참조 미리 수집 (userId로 룩업)
+		local top3racers: { RacerState? } = {}
+		for i = 1, 3 do
+			local entry = top3[i]
+			top3racers[i] = (entry and entry.userId) and racers[entry.userId] or nil
+		end
+		podiumConn = RunService.Heartbeat:Connect(function(dt: number)
+			for i = 1, 3 do
+				local r = top3racers[i]
+				if not r then continue end
+				local c = r.car
+				if not c or not c.PrimaryPart then continue end
+				-- 앵커 고정 (F)
+				if not c.PrimaryPart.Anchored then
+					c.PrimaryPart.Anchored = true
+				end
+				-- 제자리 Y축 회전 60°/초 (best-effort PivotTo)
+				pcall(function()
+					c:PivotTo(c:GetPivot() * CFrame.fromAxisAngle(Vector3.new(0, 1, 0), math.rad(dt * 60)))
+				end)
+			end
+		end)
+	end
+
+	-- podiumDuration 동안 대기 후 정리 시작 (F: 기존 task.wait(5) 교체)
+	task.wait(podiumDuration)
+	if podiumConn then
+		podiumConn:Disconnect()
+		podiumConn = nil
+	end
+
+	-- 테마 조명 → 라운지 기본 조명 복원(라운지로 돌아가기 전에 복원)
 	restoreLighting()
 	RaceManager.returnAllToLounge()
 
-	-- 트랙/차량 정리
+	-- 트랙/차량 정리: returnAllToLounge 이후에 ActiveRace 파괴 (F)
 	local active = workspace:FindFirstChild("ActiveRace")
 	if active then
 		active:Destroy()
@@ -1018,21 +1256,23 @@ function RaceManager.endRace()
 	Remotes.Event("RaceStateChanged"):FireAllClients({ state = "Idle" })
 end
 
+-- 추락 버그 수정: 캐릭터를 먼저 라운지로 이동(동기) → 이후 차량 파괴 (F)
+-- task.spawn 비동기 순서 역전으로 차량 파괴 후 캐릭터가 허공에 뜨던 문제 제거
 function RaceManager.returnAllToLounge()
 	local spawnCFrame = LoungeBuilder.getSpawnCFrame()
 	for _, racer in pairs(racers) do
-		if racer.car then
-			racer.car:Destroy()
-		end
-		-- 봇은 캐릭터가 없으니 차량만 정리. 사람만 라운지로 순간이동.
+		-- 봇은 캐릭터 없으므로 차량만 정리
 		local player = racer.player
 		if player then
 			local character = player.Character
 			if character and character:FindFirstChild("HumanoidRootPart") then
-				task.spawn(function()
-					character:PivotTo(spawnCFrame * CFrame.new(math.random(-15, 15), 0, math.random(-15, 15)))
-				end)
+				-- 차량 파괴 전 먼저 동기로 텔레포트 → 허공 추락 방지 (F)
+				character:PivotTo(spawnCFrame * CFrame.new(math.random(-15, 15), 0, math.random(-15, 15)))
 			end
+		end
+		-- 텔레포트 완료 이후 차량 파괴 (F)
+		if racer.car then
+			racer.car:Destroy()
 		end
 	end
 end

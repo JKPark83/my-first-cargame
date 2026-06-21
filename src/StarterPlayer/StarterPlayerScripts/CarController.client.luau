@@ -360,9 +360,12 @@ RunService.Heartbeat:Connect(function(dt: number)
 	local rocketEnd = seat:GetAttribute("RocketEndTime") :: number?
 	local spinEnd = seat:GetAttribute("SpinEndTime") :: number?
 	local freezeEnd = seat:GetAttribute("FreezeEndTime") :: number?
+	local boostItemEnd = seat:GetAttribute("BoostItemEndTime") :: number? -- 버섯 대시 아이템
+	local shieldEnd = seat:GetAttribute("ShieldEndTime") :: number?       -- 방어막 아이템
+	local shielded = shieldEnd ~= nil and now < shieldEnd                 -- 방어막 활성 여부
 
-	-- 물풍선에 맞음: 완전히 갇힘(정지 + 입력 무시)
-	if freezeEnd ~= nil and now < freezeEnd then
+	-- 물풍선에 맞음: 완전히 갇힘(정지 + 입력 무시) — 방어막 중 무력화
+	if not shielded and freezeEnd ~= nil and now < freezeEnd then
 		currentSpeed = 0
 		local vy = seat.AssemblyLinearVelocity.Y
 		seat.AssemblyLinearVelocity = Vector3.new(0, vy, 0)
@@ -374,8 +377,8 @@ RunService.Heartbeat:Connect(function(dt: number)
 		return
 	end
 
-	-- 바나나를 밟음: 빙글빙글 미끄러짐(주행/조향 불가)
-	if spinEnd ~= nil and now < spinEnd then
+	-- 바나나를 밟음: 빙글빙글 미끄러짐(주행/조향 불가) — 방어막 중 무력화
+	if not shielded and spinEnd ~= nil and now < spinEnd then
 		currentSpeed = lerp(currentSpeed, 0, math.clamp(dt * 2.5, 0, 1))
 		local cf = seat.CFrame
 		local horizontal = Vector3.new(cf.LookVector.X, 0, cf.LookVector.Z)
@@ -420,6 +423,9 @@ RunService.Heartbeat:Connect(function(dt: number)
 	if rocketing then
 		topSpeed *= GameConfig.Items.rocket.speedMultiplier
 		accel *= GameConfig.Items.rocket.accelMultiplier
+	elseif boostItemEnd ~= nil and now < boostItemEnd then -- 버섯 대시(로켓과 곱셈 중복 방지)
+		topSpeed *= GameConfig.Items.mushroom.speedMultiplier
+		accel *= GameConfig.Items.mushroom.accelMultiplier
 	elseif boostingPad then
 		topSpeed *= GameConfig.Boost.speedMultiplier
 		accel *= GameConfig.Boost.accelMultiplier
@@ -428,7 +434,7 @@ RunService.Heartbeat:Connect(function(dt: number)
 		topSpeed *= GameConfig.Drift.speedMultiplier
 		accel *= GameConfig.Drift.accelMultiplier
 	end
-	if slowed then
+	if slowed and not shielded then -- 방어막 중 감속 무력화
 		topSpeed *= GameConfig.Obstacles.slowFactor
 	end
 
