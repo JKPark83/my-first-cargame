@@ -20,9 +20,13 @@ local DataManager = require(script.Parent.DataManager)
 local ShopService = require(script.Parent.ShopService)
 local RaceManager = require(script.Parent.RaceManager)
 local LeaderboardService = require(script.Parent.LeaderboardService)
+local CarSpawner = require(script.Parent.CarSpawner)
 
 -- 1) 라운지 생성
 LoungeBuilder.build()
+
+-- 1.5) 차고 UI 3D 미리보기용 차량 모델을 ReplicatedStorage에 준비(클라가 ViewportFrame에 복제)
+CarSpawner.setupPreviews()
 
 -- 2) 데이터 매니저
 DataManager.init()
@@ -39,6 +43,11 @@ end)
 
 Remotes.Event("RequestLeaveQueue").OnServerEvent:Connect(function(player)
 	RaceManager.leaveQueue(player)
+end)
+
+-- 보유 아이템 사용 (바나나/로켓/물풍선)
+Remotes.Event("RequestUseItem").OnServerEvent:Connect(function(player)
+	RaceManager.useItem(player)
 end)
 
 -- 클라이언트가 최초 데이터 일괄 요청 시 응답
@@ -82,24 +91,84 @@ for _, player in ipairs(Players:GetPlayers()) do
 	onPlayerAdded(player)
 end
 
--- 경주 참가 패드: 밟으면 대기열 참가
+-- 라운지 패드 터치 공통 처리: 사람(Humanoid)만 통과 + 2초 디바운스
+local padDebounce: { [number]: number } = {} -- 경주 참가 패드
+local csDebounce: { [number]: number } = {} -- 차량 선택 패드
+
+local function acceptPadTouch(hit: BasePart, store: { [number]: number }): Player?
+	local character = hit.Parent
+	local player = character and Players:GetPlayerFromCharacter(character)
+	if not player then
+		return nil
+	end
+	-- 차량 파트 등 비캐릭터 접촉 무시: Humanoid가 있어야 통과
+	if not (character and character:FindFirstChildOfClass("Humanoid")) then
+		return nil
+	end
+	local now = os.clock()
+	if store[player.UserId] and now - store[player.UserId] < 2 then
+		return nil
+	end
+	store[player.UserId] = now
+	return player
+end
+
+-- 패드에 ProximityPrompt 부착: 밟기(Touched)는 환경에 따라 누락될 수 있어
+-- [E] 상호작용으로 확실하게 트리거되도록 보강한다.
+local function addPadPrompt(pad: BasePart, actionText: string, objectText: string): ProximityPrompt
+	local prompt = Instance.new("ProximityPrompt")
+	prompt.ActionText = actionText
+	prompt.ObjectText = objectText
+	prompt.KeyboardKeyCode = Enum.KeyCode.E
+	prompt.HoldDuration = 0
+	prompt.RequiresLineOfSight = false
+	prompt.MaxActivationDistance = 14
+	prompt.UIOffset = Vector2.new(0, 0)
+	prompt.Parent = pad
+	return prompt
+end
+
+-- 경주 참가 패드: 밟거나 [E]로 대기열 참가
 local queuePad = LoungeBuilder.getQueuePad()
 if queuePad then
-	local debounce: { [number]: number } = {}
 	queuePad.Touched:Connect(function(hit)
-		local character = hit.Parent
-		local player = character and Players:GetPlayerFromCharacter(character)
-		if not player then
-			return
+		local player = acceptPadTouch(hit, padDebounce)
+		if player then
+			RaceManager.joinQueue(player)
 		end
-		local now = os.clock()
-		if debounce[player.UserId] and now - debounce[player.UserId] < 2 then
-			return
-		end
-		debounce[player.UserId] = now
+	end)
+	local queuePrompt = addPadPrompt(queuePad, "경주 참가", "🏁 레이스")
+	queuePrompt.Triggered:Connect(function(player)
 		RaceManager.joinQueue(player)
 	end)
 end
+
+-- 차량 선택 패드: 밟거나 [E]로 차고 UI 열기 (경주 중에는 차단)
+local carSelectPad = LoungeBuilder.getCarSelectPad()
+if carSelectPad then
+	carSelectPad.Touched:Connect(function(hit)
+		if RaceManager.isRacing() then
+			return
+		end
+		local player = acceptPadTouch(hit, csDebounce)
+		if player then
+			Remotes.Event("OpenGarageUI"):FireClient(player)
+		end
+	end)
+	local csPrompt = addPadPrompt(carSelectPad, "차고 열기", "🚗 차량 선택")
+	csPrompt.Triggered:Connect(function(player)
+		if RaceManager.isRacing() then
+			return
+		end
+		Remotes.Event("OpenGarageUI"):FireClient(player)
+	end)
+end
+
+-- 퇴장 시 디바운스 테이블 정리 (메모리 누수 방지)
+Players.PlayerRemoving:Connect(function(p)
+	padDebounce[p.UserId] = nil
+	csDebounce[p.UserId] = nil
+end)
 
 -- 라운지 전광판 주기 갱신 + 전체 클라이언트 순위 브로드캐스트
 task.spawn(function()

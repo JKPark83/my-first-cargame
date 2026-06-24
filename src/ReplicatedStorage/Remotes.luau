@@ -27,17 +27,24 @@ local EVENT_NAMES = {
 	"RequestJoinQueue", -- 대기열 참가
 	"RequestLeaveQueue", -- 대기열 떠나기
 	"CarControlInput", -- 주행 입력 (throttle, steer, ...)
+	"RequestUseItem", -- 보유 아이템 사용 요청
+	"RequestDriveFix", -- 출발 후 차가 안 움직일 때(소유권 누락) 서버에 재탑승/소유권 복구 요청
 
 	-- 서버 → 클라
+	"ItemUpdated", -- 보유 아이템 인벤토리 변경 (string 배열; 예: {} / {"banana"} / {"banana","rocket"})
+	"ItemEffect", -- 아이템 발동 연출 (kind, ...)
 	"PlayerDataUpdated", -- 플레이어 데이터(머니/보유차/커스텀) 갱신
 	"QueueStateChanged", -- 대기열 상태/카운트다운 변경
 	"RaceStateChanged", -- 경주 상태(시작/진행/종료) 변경
+	"RaceLoading", -- 경주 진입 전환(트랙 생성/순간이동) 동안 로딩 화면 표시 (bool)
 	"RaceSetup", -- 경주 시작 시 트랙 외곽선/바운드(미니맵용) 전달
 	"RaceProgress", -- 실시간 순위/차량 위치(미니맵 HUD)
 	"RaceCountdown", -- 경주 시작 카운트다운
 	"RaceFinished", -- 경주 결과(순위/보상)
+	"PodiumStart", -- 시상대 연출 시작 (results, top3) 서버→클라
 	"LeaderboardUpdated", -- 글로벌 최고기록 순위 갱신
 	"Notify", -- 일반 알림 메시지
+	"OpenGarageUI", -- 차량 선택 패드 진입 → 클라이언트 차고 UI 열기
 }
 
 local FUNCTION_NAMES = {
