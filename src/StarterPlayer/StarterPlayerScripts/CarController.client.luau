@@ -602,8 +602,11 @@ RunService.Stepped:Connect(function(_t: number, dt: number)
 		if proj.Magnitude > 0.01 then
 			desired = proj.Unit * currentSpeed
 		end
-		-- 살짝 아래로 눌러 크레스트/이음새에서 잔진동 없이 노면에 붙인다
-		seat.AssemblyLinearVelocity = Vector3.new(desired.X, desired.Y - 2, desired.Z)
+		-- 살짝 아래로 눌러 크레스트/이음새에서 잔진동 없이 노면에 붙인다.
+		-- 수직 성분은 좁게 클램프(+8 상한) → 둔덕·이음새·급경사에서 위로 튕겨 하늘로
+		-- 날아가는 플링을 원천 차단. 하강은 자연스럽게 허용(-60 하한).
+		local vy = math.clamp(desired.Y - 2, -60, 8)
+		seat.AssemblyLinearVelocity = Vector3.new(desired.X, vy, desired.Z)
 	else
 		local vy = seat.AssemblyLinearVelocity.Y -- 공중: 중력 보존
 		seat.AssemblyLinearVelocity = Vector3.new(desired.X, vy, desired.Z)
@@ -630,8 +633,10 @@ RunService.Stepped:Connect(function(_t: number, dt: number)
 		targetPitch = pitchAngle * 0.5 -- 공중: 절반씩 수평으로 복귀(착지 대비)
 	end
 	local rollAngle = math.asin(math.clamp(cfNow.RightVector.Y, -1, 1))
-	local pitchRate = math.clamp((targetPitch - pitchAngle) * 8, -5, 5)
-	local rollRate = math.clamp(-rollAngle * 8, -5, 5)
+	-- 게인·클램프를 크게 낮춘다: 이전 ×8·±5rad/s(≈286°/s)는 차체를 뒤집을 만큼
+	-- 폭력적이었다. 피치는 노면을 부드럽게 추종, 롤은 항상 0(수평)으로 완만히 자립.
+	local pitchRate = math.clamp((targetPitch - pitchAngle) * 3, -1.4, 1.4)
+	local rollRate = math.clamp(-rollAngle * 4, -2.2, 2.2)
 	-- smoothedSteer: 이진 입력의 지수 평활값 → 각속도 변화가 프레임마다 부드럽게
 	seat.AssemblyAngularVelocity = Vector3.new(0, -smoothedSteer * turnRate * direction, 0)
 		+ cfNow.RightVector * pitchRate

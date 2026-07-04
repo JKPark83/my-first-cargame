@@ -60,6 +60,7 @@ end
 -- =====================================================================
 -- 사운드 (rbxasset 내장음이라 즉시 로드; 후보 리스트의 첫 로드 성공 id 사용)
 -- =====================================================================
+local ContentProvider = game:GetService("ContentProvider")
 local soundTemplates: { [string]: Sound } = {}
 do
 	for name, ids in pairs(cfg.sounds or {}) do
@@ -69,8 +70,20 @@ do
 			s.SoundId = tostring(id)
 			s.Volume = 0.7
 			s.Parent = SoundService
-			soundTemplates[name] = s
-			break -- rbxasset은 항상 성공하므로 첫 후보 사용(마켓 id를 앞에 넣으면 그걸 우선)
+			-- 실제 로드 성공을 확인. 미승인/누락 에셋이면 다음 후보로 폴백한다.
+			-- (예전엔 첫 후보를 무조건 채택 → 깨진 id면 소리가 안 나고 콘솔 에러만 남았다)
+			local loaded = false
+			pcall(function()
+				ContentProvider:PreloadAsync({ s }, function(_, status)
+					loaded = status == Enum.AssetFetchStatus.Success
+				end)
+			end)
+			if loaded then
+				soundTemplates[name] = s
+				break -- 첫 로드 성공 후보 채택(마켓 id를 앞에 넣으면 그걸 우선)
+			else
+				s:Destroy() -- 실패 후보는 폐기하고 다음 시도
+			end
 		end
 	end
 end

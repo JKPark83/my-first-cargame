@@ -263,18 +263,18 @@ GameConfig.TrackShape = {
 	enabled = true,
 
 	-- 고저차(언덕): 트랙 한 바퀴 각도 기반 사인파 2겹 합성 → 시작=끝 높이가 맞는 닫힌 루프
-	hillAmplitudeMin = 16, -- 큰 언덕 진폭 최소 (스터드)
-	hillAmplitudeMax = 30, -- 큰 언덕 진폭 최대 (스터드)
+	hillAmplitudeMin = 14, -- 큰 언덕 진폭 최소 (스터드)
+	hillAmplitudeMax = 24, -- 큰 언덕 진폭 최대 (스터드)
 	hillWavesMin = 2, -- 한 바퀴당 큰 언덕 수 최소
 	hillWavesMax = 3, -- 한 바퀴당 큰 언덕 수 최대
-	maxSlope = 0.26, -- 최대 경사(수평 1당 수직 비율, ≈14.6°) — 초과하면 진폭을 자동 축소
+	maxSlope = 0.18, -- 최대 경사(수평 1당 수직 비율, ≈10.2°) — 초과하면 진폭을 자동 축소 (완만·안전)
 	flatStartNodes = 2, -- 출발선 앞뒤로 평지로 유지할 노드 수 (스폰 그리드/로켓스타트 보호)
 
-	-- 점프 둔덕: 언덕 위에 짧은 크레스트를 더해 고속 통과 시 가볍게 붕 뜬다
+	-- 점프 둔덕: 언덕 위에 아주 짧은 크레스트 → 고속 통과 시 살짝 붕(발사 램프 아님)
 	jumpCountMin = 1, -- 트랙당 점프 둔덕 최소 개수
 	jumpCountMax = 2, -- 트랙당 점프 둔덕 최대 개수
-	jumpHeightMin = 8, -- 둔덕 추가 높이 최소 (스터드)
-	jumpHeightMax = 13, -- 둔덕 추가 높이 최대 (스터드)
+	jumpHeightMin = 3, -- 둔덕 추가 높이 최소 (스터드)
+	jumpHeightMax = 5, -- 둔덕 추가 높이 최대 (스터드)
 
 	-- 코너 리듬: 완만한 코너 위주 + 트랙당 헤어핀(U자 급코너) 1~2개
 	hairpinCountMin = 1,
@@ -436,14 +436,15 @@ GameConfig.ItemFX = {
 	nearMissRadius = 40, -- 물풍선 착지 지점에서 이 거리 안이면 구경꾼도 살짝 흔들림
 	popTextDuration = 1.0, -- 중앙 코믹 텍스트("명중!" 등) 표시 시간(초)
 	flashDuration = 0.3, -- 피격 화면 플래시 지속(초)
-	sounds = { -- 앞에서부터 로드에 성공하는 id 사용(rbxasset:// 내장음은 항상 성공)
+	sounds = { -- 앞에서부터 로드 검증에 성공하는 id 사용(ItemFXController가 PreloadAsync로 확인)
 		splash = { "rbxasset://sounds/impact_water.mp3" },
 		spin = { "rbxasset://sounds/uuhhh.mp3" },
 		pop = { "rbxasset://sounds/snap.mp3" },
 		splat = { "rbxasset://sounds/splat.mp3" },
 		zap = { "rbxasset://sounds/electronicpingshort.wav" },
 		block = { "rbxasset://sounds/button.wav" },
-		swoosh = { "rbxasset://sounds/swoosh.wav" },
+		-- swoosh.wav는 미승인으로 로드 실패(콘솔 에러) → 확실한 내장음으로 대체
+		swoosh = { "rbxasset://sounds/snap.mp3" },
 	},
 }
 
