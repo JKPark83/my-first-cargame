@@ -43,6 +43,7 @@ export type Customization = {
 	neonColor: { number },
 	sticker: string, -- 스티커 id
 	plate: string, -- 번호판 텍스트
+	name: string, -- 차 이름 (차량 위 이름표), 기본값 "박서우차"
 }
 
 export type PlayerData = {
