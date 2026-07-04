@@ -7,7 +7,10 @@
 	- 시트의 Throttle/Steer(WASD) 입력을 읽어 속도/방향 제어
 	- 네트워크 소유권이 운전자에게 있어 조작이 부드럽게 반영됨
 
-	아케이드 모델: 가벼운 가속/감속, 속도 비례 회전, 평면 주행 유지.
+	아케이드 모델: 가벼운 가속/감속, 속도 비례 회전, 경사면 추종 주행.
+	  - 접지 중: 노면 법선에 속도를 투영해 언덕을 자연스럽게 오르내리고,
+	    차체 피치/롤을 노면에 맞춰 능동 정렬한다.
+	  - 공중(점프 둔덕): 중력에 맡겨 가볍게 붕 뜨는 점프감을 낸다.
 ]]
 
 local Players = game:GetService("Players")
@@ -574,9 +577,37 @@ RunService.Stepped:Connect(function(_t: number, dt: number)
 		moveDir = heading
 	end
 
-	local vy = seat.AssemblyLinearVelocity.Y
+	-- ── 경사면 추종 (입체 트랙 대응) ──────────────────────────────
+	-- 접지 판정: 시트 아래로 짧은 레이캐스트(충돌 가능한 노면만). 노면 법선을 얻는다.
+	--  • 접지 중  : 수평 진행방향(moveDir)을 노면 평면에 투영한 방향으로 속도를 쓴다
+	--               → 오르막에서 도로를 파고들지 않고, 내리막에서 노면에 붙어 내려간다.
+	--  • 공중     : 수직 속도(vy)는 중력에 맡기고 XZ만 제어 → 점프 둔덕에서 가볍게 붕 뜬다.
+	local groundNormal: Vector3? = nil
+	do
+		local carModel = seat:FindFirstAncestorWhichIsA("Model")
+		local rp = RaycastParams.new()
+		rp.FilterType = Enum.RaycastFilterType.Exclude
+		rp.FilterDescendantsInstances = { carModel or seat }
+		rp.RespectCanCollide = true -- 부스트패드/아이템박스 등 통과형 파트는 접지로 안 침
+		local hit = workspace:Raycast(seat.Position, Vector3.new(0, -6.5, 0), rp)
+		if hit and hit.Normal.Y > 0.7 then -- 45°보다 가파른 면(벽 등)은 노면으로 안 봄
+			groundNormal = hit.Normal
+		end
+	end
+
 	local desired = moveDir * currentSpeed
-	seat.AssemblyLinearVelocity = Vector3.new(desired.X, vy, desired.Z)
+	if groundNormal then
+		local n = groundNormal :: Vector3
+		local proj = moveDir - n * moveDir:Dot(n) -- 노면 평면에 투영
+		if proj.Magnitude > 0.01 then
+			desired = proj.Unit * currentSpeed
+		end
+		-- 살짝 아래로 눌러 크레스트/이음새에서 잔진동 없이 노면에 붙인다
+		seat.AssemblyLinearVelocity = Vector3.new(desired.X, desired.Y - 2, desired.Z)
+	else
+		local vy = seat.AssemblyLinearVelocity.Y -- 공중: 중력 보존
+		seat.AssemblyLinearVelocity = Vector3.new(desired.X, vy, desired.Z)
+	end
 
 	-- 속도에 비례한 회전 (정지 시 회전 약함). 드리프트 중엔 더 날카롭게.
 	local speedFactor = math.clamp(math.abs(currentSpeed) / topSpeed, 0, 1)
@@ -585,8 +616,26 @@ RunService.Stepped:Connect(function(_t: number, dt: number)
 		turnRate *= dcfg.turnBoost
 	end
 	local direction = currentSpeed >= 0 and 1 or -1
+	-- 차체 자세 제어: 요(조향)는 기존대로 월드 Y축, 피치/롤은 노면에 맞춰 능동 정렬.
+	-- (이전엔 각속도 X/Z를 매 프레임 0으로 눌러 차체가 항상 수평 → 경사에서 노면과 어긋났다)
+	local cfNow = seat.CFrame
+	local pitchAngle = math.asin(math.clamp(cfNow.LookVector.Y, -1, 1))
+	local targetPitch: number
+	if groundNormal then
+		-- 노면 위 진행 방향의 상승각 = 목표 피치
+		local n = groundNormal :: Vector3
+		local proj = moveDir - n * moveDir:Dot(n)
+		targetPitch = if proj.Magnitude > 0.01 then math.asin(math.clamp(proj.Unit.Y, -1, 1)) else 0
+	else
+		targetPitch = pitchAngle * 0.5 -- 공중: 절반씩 수평으로 복귀(착지 대비)
+	end
+	local rollAngle = math.asin(math.clamp(cfNow.RightVector.Y, -1, 1))
+	local pitchRate = math.clamp((targetPitch - pitchAngle) * 8, -5, 5)
+	local rollRate = math.clamp(-rollAngle * 8, -5, 5)
 	-- smoothedSteer: 이진 입력의 지수 평활값 → 각속도 변화가 프레임마다 부드럽게
 	seat.AssemblyAngularVelocity = Vector3.new(0, -smoothedSteer * turnRate * direction, 0)
+		+ cfNow.RightVector * pitchRate
+		+ cfNow.LookVector * rollRate
 
 	-- 충돌 감지: 빠르게 가려는데 실제 이동이 막히면 벽/차 충돌로 간주 → 불꽃 신호 + 튕김 감속
 	local fxcfg = GameConfig.CarFX

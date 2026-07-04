@@ -246,9 +246,9 @@ local function botCFrameAt(route: { Vector3 }, routePos: number, laneOffset: num
 	local i1 = (i0 % n) + 1
 	local a, b = route[i0], route[i1]
 	local pos = a:Lerp(b, frac)
+	-- 경사 추종: 진행 방향(피치 포함)을 그대로 바라봐 오르막/내리막에서 차체가 노면과 나란해진다
 	local dir = b - a
-	local flat = Vector3.new(dir.X, 0, dir.Z)
-	local look = if flat.Magnitude > 0.01 then CFrame.lookAt(pos, pos + flat.Unit) else CFrame.new(pos)
+	local look = if dir.Magnitude > 0.01 then CFrame.lookAt(pos, pos + dir.Unit) else CFrame.new(pos)
 	return look * CFrame.new(laneOffset, BOT_RIDE_HEIGHT, 0)
 end
 
@@ -930,6 +930,18 @@ local function useBalloon(racer: RacerState): boolean
 	local splashR: number = cfg.splashRadius or 18
 	local duration: number = cfg.freezeDuration
 	local landPos = seat.Position + flat * throwDist
+	-- 입체 트랙 대응: 착지 지점 XZ에서 위→아래 레이캐스트로 도로 높이에 Y를 스냅
+	-- (언덕/내리막에서 물풍선이 공중이나 도로 밑에 착지하는 것 방지; splash 판정 자체는 XZ 2D)
+	do
+		local rp = RaycastParams.new()
+		rp.FilterType = Enum.RaycastFilterType.Exclude
+		rp.FilterDescendantsInstances = { car }
+		rp.RespectCanCollide = true
+		local hit = workspace:Raycast(landPos + Vector3.new(0, 100, 0), Vector3.new(0, -300, 0), rp)
+		if hit then
+			landPos = Vector3.new(landPos.X, hit.Position.Y, landPos.Z)
+		end
+	end
 	local throwerId = racer.userId
 	local fromUserId = racer.player and racer.player.UserId or 0
 

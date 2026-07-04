@@ -11,8 +11,10 @@
 	  랩 수는 "총 ~2분" 목표(GameConfig.Race.targetRaceSeconds)에 맞춰 자동 산출
 	- 경주 시작 시 RaceManager가 index로 하나를 골라 build() 호출
 
-	트랙은 평면(아케이드)으로 생성되며, 체크포인트를 순서대로 통과하면
-	랩이 인정됩니다(결승선 = 1번 체크포인트).
+	트랙은 입체(언덕/내리막/점프 둔덕 + 헤어핀)로 생성됩니다.
+	고저차·급코너 파라미터는 GameConfig.TrackShape에서 조정하며,
+	출발선 주변은 항상 평지로 유지됩니다(스폰/로켓스타트 보호).
+	체크포인트를 순서대로 통과하면 랩이 인정됩니다(결승선 = 1번 체크포인트).
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -96,20 +98,136 @@ local function lapsForLapTime(t: number): number
 	return math.clamp(raw, 4, 7)
 end
 
--- 루프를 구성하는 평면상의 노드(위치) 목록 생성
---   nodeCount: 제어점 수(클수록 굴곡이 많아 모양 다양), baseRadius: 기본 반경
+-- 서로 최소 간격을 지키며 노드 인덱스 몇 개를 고른다 (헤어핀/점프 위치 선정용)
+--   margin: 출발선 앞뒤 제외 폭, minGap: 선택끼리 최소 노드 간격
+local function pickNodeIndices(
+	rng: Random,
+	count: number,
+	nodeCount: number,
+	margin: number,
+	minGap: number,
+	avoid: { [number]: boolean }?
+): { number }
+	local chosen: { number } = {}
+	local lo, hi = margin + 1, nodeCount - margin
+	if hi <= lo then
+		return chosen
+	end
+	local attempts = 0
+	while #chosen < count and attempts < 60 do
+		attempts += 1
+		local i = rng:NextInteger(lo, hi)
+		local ok = true
+		if avoid then
+			for d = -minGap + 1, minGap - 1 do
+				if avoid[i + d] then
+					ok = false
+					break
+				end
+			end
+		end
+		if ok then
+			for _, j in ipairs(chosen) do
+				if math.abs(i - j) < minGap then
+					ok = false
+					break
+				end
+			end
+		end
+		if ok then
+			chosen[#chosen + 1] = i
+		end
+	end
+	return chosen
+end
+
+-- 루프를 구성하는 노드(위치) 목록 생성 — 입체 트랙
+--   • XZ: 부드러운 반경 변조(사인 2겹)로 완만 코너 리듬 + 헤어핀 노드를 안쪽으로 당겨 U자 급코너
+--   • Y : 각도 기반 사인파 언덕(닫힌 루프 보장) + 점프 둔덕, 출발선 주변은 평지 유지
+--   반경이 각도의 단일값 함수라서 경로가 자기 교차하지 않는다.
 local function generateNodes(rng: Random, nodeCount: number, baseRadius: number): { Vector3 }
+	local shape = ((GameConfig :: any).TrackShape or {}) :: any
+	local shapeOn = shape.enabled ~= false
+
+	-- (a) 코너 리듬: 노드별 랜덤 지터 대신 부드러운 사인 변조 → 완만 구간/굽은 구간이 번갈아 나온다
+	local rWaves1 = rng:NextInteger(2, 3)
+	local rPhase1 = rng:NextNumber(0, math.pi * 2)
+	local rAmp1 = rng:NextNumber(0.06, 0.12)
+	local rWaves2 = rng:NextInteger(4, 6)
+	local rPhase2 = rng:NextNumber(0, math.pi * 2)
+	local rAmp2 = rng:NextNumber(0.03, 0.07)
+	local squish = rng:NextNumber(0.92, 1.08) -- 타원 변형(트랙당 1개 고정)
+
+	local flatN: number = shape.flatStartNodes or 2
+
+	-- (b) 헤어핀: 몇 개 노드를 안쪽으로 강하게 당긴다 (출발 평지 구간은 피함)
+	local pullByNode: { [number]: number } = {}
+	local hairpinMark: { [number]: boolean } = {}
+	if shapeOn then
+		local hpCount = rng:NextInteger(shape.hairpinCountMin or 1, shape.hairpinCountMax or 2)
+		local hairpins = pickNodeIndices(rng, hpCount, nodeCount, flatN + 2, 4, nil)
+		for _, i in ipairs(hairpins) do
+			pullByNode[i] = shape.hairpinPull or 0.35
+			local side = shape.hairpinNeighborPull or 0.1
+			pullByNode[i - 1] = math.max(pullByNode[i - 1] or 0, side)
+			pullByNode[i + 1] = math.max(pullByNode[i + 1] or 0, side)
+			hairpinMark[i - 1], hairpinMark[i], hairpinMark[i + 1] = true, true, true
+		end
+	end
+
+	-- (c) 언덕: 사인파 2겹(주파수 정수 → 닫힌 루프에서 시작=끝 높이 보장)
+	local hWaves1 = rng:NextInteger(shape.hillWavesMin or 2, shape.hillWavesMax or 3)
+	local hPhase1 = rng:NextNumber(0, math.pi * 2)
+	local hAmp1 = rng:NextNumber(shape.hillAmplitudeMin or 16, shape.hillAmplitudeMax or 30)
+	local hWaves2 = hWaves1 * 2 + 1
+	local hPhase2 = rng:NextNumber(0, math.pi * 2)
+	local hAmp2 = hAmp1 * rng:NextNumber(0.25, 0.45)
+
+	-- 경사 한계: 최대 기울기(dθ 기준 보수 추정)를 호 길이로 나눠 maxSlope 이하가 되도록 진폭 축소
+	local elevScale = 1
+	if shapeOn then
+		local maxDeriv = hAmp1 * hWaves1 + hAmp2 * hWaves2
+		local minArcRadius = baseRadius * 0.75 -- 반경 변조/헤어핀을 감안한 보수적 최소 반경
+		local slope = maxDeriv / math.max(minArcRadius, 1)
+		local maxSlope: number = shape.maxSlope or 0.26
+		if slope > maxSlope then
+			elevScale = maxSlope / slope
+		end
+	else
+		elevScale = 0
+	end
+
+	-- 출발선 주변 평지 블렌딩: 노드 1에서 멀어질수록 0→1 스무스스텝
+	local function flatFactor(i: number): number
+		local dist = math.min(i - 1, nodeCount - (i - 1))
+		local t = math.clamp((dist - flatN) / 2, 0, 1)
+		return t * t * (3 - 2 * t)
+	end
+
 	local nodes: { Vector3 } = {}
 	for i = 1, nodeCount do
 		local angle = (i - 1) / nodeCount * math.pi * 2
-		-- 반경에 완만한 노이즈를 주어 트랙마다 모양이 달라지되, 너무 들쭉날쭉하지 않게 함
-		local radiusJitter = rng:NextNumber(0.82, 1.16)
-		local radius = baseRadius * radiusJitter
-		-- 살짝 타원으로 변형(자연스러운 곡선)
+		local rf = 1 + rAmp1 * math.sin(rWaves1 * angle + rPhase1) + rAmp2 * math.sin(rWaves2 * angle + rPhase2)
+		local pull = if shapeOn then (pullByNode[i] or 0) else 0
+		local radius = baseRadius * rf * (1 - pull)
 		local x = math.cos(angle) * radius
-		local z = math.sin(angle) * radius * rng:NextNumber(0.92, 1.08)
-		nodes[i] = Vector3.new(x, 0, z)
+		local z = math.sin(angle) * radius * squish
+		local y = (hAmp1 * math.sin(hWaves1 * angle + hPhase1) + hAmp2 * math.sin(hWaves2 * angle + hPhase2))
+			* elevScale
+			* flatFactor(i)
+		nodes[i] = Vector3.new(x, y, z)
 	end
+
+	-- (d) 점프 둔덕: 헤어핀/출발 구간을 피해 노드에 크레스트 추가 (Catmull-Rom이 부드러운 둔덕으로 보간)
+	if shapeOn then
+		local jCount = rng:NextInteger(shape.jumpCountMin or 1, shape.jumpCountMax or 2)
+		local jumps = pickNodeIndices(rng, jCount, nodeCount, flatN + 2, 3, hairpinMark)
+		for _, i in ipairs(jumps) do
+			local h = rng:NextNumber(shape.jumpHeightMin or 8, shape.jumpHeightMax or 13)
+			nodes[i] += Vector3.new(0, h, 0)
+		end
+	end
+
 	return nodes
 end
 
@@ -216,11 +334,23 @@ local function makeRoadSegment(a: Vector3, b: Vector3, parent: Instance, index: 
 	end
 end
 
--- 경로 위 한 지점의 진행 방향 CFrame (i번째 점에서 다음 점을 바라봄)
+-- 경로 위 한 지점의 진행 방향 CFrame (i번째 점에서 다음 점을 바라봄, 경사 피치 포함)
 local function pathCFrameAt(path: { Vector3 }, i: number): CFrame
 	local a = path[i]
 	local b = path[(i % #path) + 1]
 	return CFrame.lookAt(a, b)
+end
+
+-- 경로 위 한 지점의 "수평" 진행 방향 CFrame — 경사에서도 수직으로 서야 하는 장식용
+local function pathFlatCFrameAt(path: { Vector3 }, i: number): CFrame
+	local a = path[i]
+	local b = path[(i % #path) + 1]
+	local dir = b - a
+	local flat = Vector3.new(dir.X, 0, dir.Z)
+	if flat.Magnitude < 0.01 then
+		return CFrame.new(a)
+	end
+	return CFrame.lookAt(a, a + flat.Unit)
 end
 
 -- 부스트 패드 생성 (테마 색 적용)
@@ -697,8 +827,8 @@ function TrackGenerator.build(index: number, parent: Instance?): TrackInfo
 		local pIdx = math.floor(#path * (i - 0.5) / decorCount) + 1
 		pIdx = ((pIdx - 1) % #path) + 1
 		local side = (i % 2 == 0) and 1 or -1
-		-- 가드레일(ROAD_WIDTH/2)에서 7스터드 바깥
-		local cf = pathCFrameAt(path, pIdx) * CFrame.new(side * (ROAD_WIDTH / 2 + 7), 0, 0)
+		-- 가드레일(ROAD_WIDTH/2)에서 7스터드 바깥 — 경사에서도 소품이 수직으로 서도록 수평 CFrame 사용
+		local cf = pathFlatCFrameAt(path, pIdx) * CFrame.new(side * (ROAD_WIDTH / 2 + 7), 0, 0)
 		local key = props[((i - 1) % #props) + 1]
 		local builder = PROP_BUILDERS[key] or PROP_BUILDERS.cone
 		builder(cf, decorFolder, theme)
