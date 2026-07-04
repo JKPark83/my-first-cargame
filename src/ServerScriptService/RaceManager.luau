@@ -639,6 +639,7 @@ local function dropBanana(racer: RacerState)
 
 	local placedAt = workspace:GetServerTimeNow()
 	local consumed = false
+	local lastBlock: { [number]: number } = {} -- userId → 마지막 방어막 연출 시각(Touched 반복 발화 디바운스)
 	banana.Touched:Connect(function(hit)
 		if consumed or state ~= "Racing" then
 			return
@@ -656,15 +657,23 @@ local function dropBanana(racer: RacerState)
 		if racer.player and victim.player and victim.player.UserId == racer.player.UserId and (now - placedAt) < cfg.armDelay then
 			return
 		end
-		-- 방어막(ShieldEndTime) 유효 시 피격 스킵 (C)
+		-- 방어막(ShieldEndTime) 유효 시 피격 스킵 (C) + 튕겨냄 연출
 		local shieldEnd = victim.car.PrimaryPart:GetAttribute("ShieldEndTime")
 		if typeof(shieldEnd) == "number" and now < shieldEnd then
+			if (lastBlock[victim.userId] or 0) + 1 < now then
+				lastBlock[victim.userId] = now
+				Remotes.Event("ItemEffect"):FireAllClients({ kind = "shieldBlock", userId = victim.userId })
+			end
 			return
 		end
 		consumed = true
 		victim.car.PrimaryPart:SetAttribute("SpinEndTime", now + cfg.spinDuration)
 		if victim.player then
-			Remotes.Event("ItemEffect"):FireAllClients({ kind = "banana", userId = victim.player.UserId })
+			Remotes.Event("ItemEffect"):FireAllClients({
+				kind = "banana",
+				userId = victim.player.UserId,
+				fromUserId = racer.player and racer.player.UserId or 0,
+			})
 		end
 		banana:Destroy()
 	end)
@@ -728,9 +737,13 @@ local function dropSlick(racer: RacerState)
 			return
 		end
 		local now = workspace:GetServerTimeNow()
-		-- 방어막(ShieldEndTime) 유효 시 피격 스킵 (C)
+		-- 방어막(ShieldEndTime) 유효 시 피격 스킵 (C) + 튕겨냄 연출 (디바운스 겸용 lastHit 사용)
 		local shieldEnd = victim.car.PrimaryPart:GetAttribute("ShieldEndTime")
 		if typeof(shieldEnd) == "number" and now < shieldEnd then
+			if (lastHit[victim.userId] or 0) + 1 < now then
+				lastHit[victim.userId] = now
+				Remotes.Event("ItemEffect"):FireAllClients({ kind = "shieldBlock", userId = victim.userId })
+			end
 			return
 		end
 		-- 디바운스: Touched는 물리 스텝마다 반복 발화하므로 감속 지속시간 내 재발화 차단
@@ -741,6 +754,11 @@ local function dropSlick(racer: RacerState)
 		victim.car.PrimaryPart:SetAttribute("SlowEndTime", now + cfg.slowDuration)
 		if victim.player then
 			notify(victim.player, "🛢️ 기름통을 밟았어요! 속도가 느려져요!")
+			Remotes.Event("ItemEffect"):FireAllClients({
+				kind = "slick",
+				userId = victim.player.UserId,
+				fromUserId = racer.player and racer.player.UserId or 0,
+			})
 		end
 	end)
 
@@ -801,6 +819,7 @@ local function balloonSplash(throwerId: number, fromUserId: number, landPos: Vec
 	end
 	local now = workspace:GetServerTimeNow()
 	local hitCount = 0
+	local victimIds: { number } = {} -- 클라 연출용(피격자 화면 흔들림/텍스트)
 	for _, other in pairs(racers) do
 		if other.userId == throwerId or other.finished then
 			continue
@@ -815,12 +834,13 @@ local function balloonSplash(throwerId: number, fromUserId: number, landPos: Vec
 			continue
 		end
 
-		-- 방어막(ShieldEndTime) 유효 시 이 대상만 스킵
+		-- 방어막(ShieldEndTime) 유효 시 이 대상만 스킵 + 튕겨냄 연출
 		local shieldEnd = other.car.PrimaryPart:GetAttribute("ShieldEndTime")
 		if typeof(shieldEnd) == "number" and now < shieldEnd then
 			if other.player then
 				notify(other.player, "🛡️ 방어막이 물풍선을 막았어요!")
 			end
+			Remotes.Event("ItemEffect"):FireAllClients({ kind = "shieldBlock", userId = other.userId })
 			continue
 		end
 
@@ -836,6 +856,7 @@ local function balloonSplash(throwerId: number, fromUserId: number, landPos: Vec
 		end
 		spawnFreezeBubble(other, duration)
 		hitCount += 1
+		victimIds[#victimIds + 1] = other.userId
 	end
 
 	-- 착지(물보라) 이펙트 브로드캐스트: 클라이언트에서 물보라 연출 가능
@@ -846,6 +867,7 @@ local function balloonSplash(throwerId: number, fromUserId: number, landPos: Vec
 		landY = landPos.Y,
 		landZ = landPos.Z,
 		hit = hitCount,
+		victims = victimIds,
 	})
 end
 
@@ -983,13 +1005,15 @@ local function useLightning(racer: RacerState)
 	local now = workspace:GetServerTimeNow()
 	local myProgress = racer.progress
 	local hitCount = 0
+	local victimIds: { number } = {} -- 클라 연출용(피격자 화면 흔들림/번개 낙뢰)
 	for _, other in pairs(racers) do
 		-- 봇 제외, 본인 제외, 앞선(더 많이 진행한) 사람 레이서만 (C)
 		if not other.isBot and other.userId ~= racer.userId and other.progress > myProgress then
 			if other.car and other.car.PrimaryPart then
-				-- 방어막(ShieldEndTime) 유효 시 스킵 (C)
+				-- 방어막(ShieldEndTime) 유효 시 스킵 (C) + 튕겨냄 연출
 				local shieldEnd = other.car.PrimaryPart:GetAttribute("ShieldEndTime")
 				if typeof(shieldEnd) == "number" and now < shieldEnd then
+					Remotes.Event("ItemEffect"):FireAllClients({ kind = "shieldBlock", userId = other.userId })
 					continue
 				end
 				other.car.PrimaryPart:SetAttribute("SlowEndTime", now + cfg.slowDuration)
@@ -997,10 +1021,11 @@ local function useLightning(racer: RacerState)
 					notify(other.player, "⚡ 번개 공격! 잠시 속도가 느려졌어요!")
 				end
 				hitCount += 1
+				victimIds[#victimIds + 1] = other.userId
 			end
 		end
 	end
-	Remotes.Event("ItemEffect"):FireAllClients({ kind = "lightning", userId = racer.userId })
+	Remotes.Event("ItemEffect"):FireAllClients({ kind = "lightning", userId = racer.userId, victims = victimIds })
 	if hitCount == 0 and racer.player then
 		notify(racer.player, "⚡ 번개! (앞에 맞출 사람 레이서가 없어요)")
 	end

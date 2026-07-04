@@ -419,6 +419,35 @@ GameConfig.Items = {
 }
 
 -- =====================================================================
+-- 아이템 타격감 연출 (클라이언트 ItemFXController)
+-- =====================================================================
+-- 게임플레이(속도/상태)에는 영향 없는 순수 연출 강도 설정.
+GameConfig.ItemFX = {
+	enabled = true,
+	shakeDecay = 3.2, -- 카메라 흔들림 감쇠 속도(클수록 빨리 잦아듦)
+	shake = { -- 이벤트별 카메라 흔들림 강도(도 단위, 피격자 기준)
+		banana = 1.5,
+		slick = 1.0,
+		balloon = 1.8,
+		lightning = 1.2,
+		shieldBlock = 0.5,
+		rocket = 0.4, -- 본인 발사 반동
+	},
+	nearMissRadius = 40, -- 물풍선 착지 지점에서 이 거리 안이면 구경꾼도 살짝 흔들림
+	popTextDuration = 1.0, -- 중앙 코믹 텍스트("명중!" 등) 표시 시간(초)
+	flashDuration = 0.3, -- 피격 화면 플래시 지속(초)
+	sounds = { -- 앞에서부터 로드에 성공하는 id 사용(rbxasset:// 내장음은 항상 성공)
+		splash = { "rbxasset://sounds/impact_water.mp3" },
+		spin = { "rbxasset://sounds/uuhhh.mp3" },
+		pop = { "rbxasset://sounds/snap.mp3" },
+		splat = { "rbxasset://sounds/splat.mp3" },
+		zap = { "rbxasset://sounds/electronicpingshort.wav" },
+		block = { "rbxasset://sounds/button.wav" },
+		swoosh = { "rbxasset://sounds/swoosh.wav" },
+	},
+}
+
+-- =====================================================================
 -- 테마 트랙 (사탕/과자/동물/바다/우주/용암 나라)
 -- =====================================================================
 -- 각 트랙은 고유 테마를 가진다: 도로/난간/부스트/아이템박스 색, 조명 분위기,
