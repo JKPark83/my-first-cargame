@@ -612,6 +612,210 @@ local PROP_BUILDERS: { [string]: PropBuilder } = {
 }
 
 -- =====================================================================
+-- 레이싱 분위기 연출물 — 스타트 게이트/관중석/광고판/깃발/풍선/조명탑
+-- =====================================================================
+-- 전부 Anchored=true, CanCollide=false (가드레일 바깥 장식이라 주행 방해 없음).
+
+-- 파트 면에 체커(격자) 무늬 SurfaceGui 부착
+local function addCheckerFace(part: BasePart, face: Enum.NormalId, rows: number, cols: number)
+	local sg = Instance.new("SurfaceGui")
+	sg.Face = face
+	sg.CanvasSize = Vector2.new(cols * 40, rows * 40)
+	sg.Parent = part
+	for r = 0, rows - 1 do
+		for c = 0, cols - 1 do
+			local cell = Instance.new("Frame")
+			cell.BorderSizePixel = 0
+			cell.BackgroundColor3 = ((r + c) % 2 == 0) and Color3.fromRGB(24, 24, 24) or Color3.fromRGB(245, 245, 245)
+			cell.Position = UDim2.fromScale(c / cols, r / rows)
+			cell.Size = UDim2.fromScale(1 / cols, 1 / rows)
+			cell.Parent = sg
+		end
+	end
+end
+
+-- 파트 면에 텍스트 SurfaceGui 부착
+local function addTextFace(part: BasePart, face: Enum.NormalId, text: string, textColor: Color3, bgColor: Color3?)
+	local sg = Instance.new("SurfaceGui")
+	sg.Face = face
+	sg.CanvasSize = Vector2.new(400, 120)
+	sg.Parent = part
+	local lbl = Instance.new("TextLabel")
+	lbl.Size = UDim2.fromScale(1, 1)
+	lbl.BackgroundTransparency = bgColor and 0 or 1
+	if bgColor then
+		lbl.BackgroundColor3 = bgColor
+	end
+	lbl.BorderSizePixel = 0
+	lbl.Font = Enum.Font.GothamBlack
+	lbl.Text = text
+	lbl.TextColor3 = textColor
+	lbl.TextStrokeColor3 = Color3.fromRGB(20, 20, 20)
+	lbl.TextStrokeTransparency = 0.4
+	lbl.TextScaled = true
+	lbl.Parent = sg
+end
+
+-- 스타트 게이트: 도로 양옆 기둥 + 체커 빔 + START 텍스트 + 조명
+local function buildStartGate(startLook: CFrame, parent: Instance, pal: Palette)
+	local pillarH = 24
+	local half = ROAD_WIDTH / 2 + 3.5
+	for _, side in ipairs({ -1, 1 }) do
+		local base = startLook * CFrame.new(side * half, 0, 0)
+		box(parent, 3.2, pillarH, 3.2, pal.wall, SP, base * CFrame.new(0, pillarH / 2, 0))
+		-- 기둥 꼭대기 네온 구(좌우 레일색으로 방향감)
+		ball(parent, 4.6, side == -1 and pal.railLeft or pal.railRight, NEON, base * CFrame.new(0, pillarH + 1.8, 0))
+	end
+	-- 상단 빔(체커 + START, 양면)
+	local beam = box(
+		parent,
+		half * 2 + 3.2,
+		6,
+		3,
+		Color3.fromRGB(250, 250, 250),
+		SP,
+		startLook * CFrame.new(0, pillarH + 3, 0)
+	)
+	for _, face in ipairs({ Enum.NormalId.Front, Enum.NormalId.Back }) do
+		addCheckerFace(beam, face, 2, 16)
+	end
+	-- 빔 위 START 간판
+	local sign = box(
+		parent,
+		26,
+		5,
+		2.2,
+		Color3.fromRGB(28, 30, 40),
+		SP,
+		startLook * CFrame.new(0, pillarH + 8.5, 0)
+	)
+	for _, face in ipairs({ Enum.NormalId.Front, Enum.NormalId.Back }) do
+		addTextFace(sign, face, "🏁 START 🏁", Color3.fromRGB(255, 230, 80))
+	end
+	-- 게이트 아래를 비추는 스포트라이트 2개(야간 테마에서 극적인 출발선)
+	for _, side in ipairs({ -1, 1 }) do
+		local att = Instance.new("Attachment")
+		att.Parent = beam
+		att.Position = Vector3.new(side * (half * 0.5), -3, 0)
+		local sl = Instance.new("SpotLight")
+		sl.Face = Enum.NormalId.Bottom
+		sl.Angle = 120
+		sl.Range = 34
+		sl.Brightness = 1.4
+		sl.Color = Color3.fromRGB(255, 250, 235)
+		sl.Parent = att
+	end
+end
+
+-- 관중석: 계단식 스탠드 + 알록달록 관중(공) + 줄무늬 지붕
+local SPECTATOR_COLORS = {
+	Color3.fromRGB(255, 105, 97),
+	Color3.fromRGB(255, 200, 80),
+	Color3.fromRGB(120, 220, 120),
+	Color3.fromRGB(100, 180, 255),
+	Color3.fromRGB(220, 140, 255),
+	Color3.fromRGB(255, 160, 130),
+}
+
+local function buildGrandstand(cf: CFrame, parent: Instance, decorA: Color3, decorB: Color3, rng: Random)
+	local width = 36
+	local stepDepth = 3.6
+	local stepRise = 2.0
+	local steps = 5
+	-- 계단 단 + 관중
+	for r = 1, steps do
+		local z = (r - 1) * stepDepth + 2 -- 도로에서 멀어질수록(로컬 +Z) 높아짐
+		local y = (r - 1) * stepRise
+		box(
+			parent,
+			width,
+			1.6,
+			stepDepth,
+			Color3.fromRGB(214, 218, 228),
+			SP,
+			cf * CFrame.new(0, y + 0.8, z)
+		)
+		-- 관중: 단마다 6명, 색/크기 랜덤(시드 기반이라 재현 가능)
+		for s = 1, 6 do
+			local d = rng:NextNumber(1.9, 2.5)
+			local x = (s - 3.5) * (width / 6.4) + rng:NextNumber(-0.8, 0.8)
+			local col = SPECTATOR_COLORS[rng:NextInteger(1, #SPECTATOR_COLORS)]
+			ball(parent, d, col, SP, cf * CFrame.new(x, y + 1.6 + d / 2, z))
+		end
+	end
+	-- 양옆 측벽
+	local backZ = (steps - 1) * stepDepth + 2
+	local topY = (steps - 1) * stepRise
+	for _, side in ipairs({ -1, 1 }) do
+		box(
+			parent,
+			1.4,
+			topY + 3,
+			backZ + stepDepth,
+			Color3.fromRGB(190, 195, 206),
+			SP,
+			cf * CFrame.new(side * (width / 2 + 0.7), (topY + 3) / 2, backZ / 2 + 1)
+		)
+	end
+	-- 기둥 + 줄무늬 지붕(테마 색 2줄)
+	for _, side in ipairs({ -1, 1 }) do
+		vcyl(parent, topY + 9, 1.2, Color3.fromRGB(170, 175, 188), SP, cf * CFrame.new(side * (width / 2 - 1), 0, backZ))
+	end
+	local roofY = topY + 9.6
+	box(parent, width + 4, 1.2, backZ + 8, decorA, SP, cf * CFrame.new(0, roofY, backZ / 2 + 1))
+	box(parent, width + 4, 1.3, 4, decorB, SP, cf * CFrame.new(0, roofY + 0.05, backZ / 2 + 1))
+end
+
+-- 광고판: 다리 2개 + 보드 + 도로 쪽 텍스트
+local function buildAdBoard(cf: CFrame, parent: Instance, text: string, boardColor: Color3, textColor: Color3)
+	for _, side in ipairs({ -1, 1 }) do
+		vcyl(parent, 5, 1, Color3.fromRGB(90, 95, 108), SP, cf * CFrame.new(side * 6.5, 0, 0))
+	end
+	local board = box(parent, 16, 6, 1, boardColor, SP, cf * CFrame.new(0, 8, 0))
+	addTextFace(board, Enum.NormalId.Front, text, textColor)
+	addTextFace(board, Enum.NormalId.Back, text, textColor)
+end
+
+-- 깃발 기둥: 폴 + 펄럭이는 삼각 깃발 2장
+local function buildFlagPole(cf: CFrame, parent: Instance, colA: Color3, colB: Color3)
+	vcyl(parent, 14, 0.8, Color3.fromRGB(230, 232, 238), SP, cf)
+	box(parent, 5, 2.6, 0.3, colA, SP, cf * CFrame.new(2.6, 12.6, 0))
+	box(parent, 4, 2.2, 0.3, colB, SP, cf * CFrame.new(2.1, 9.6, 0))
+	ball(parent, 1.3, colA, NEON, cf * CFrame.new(0, 14.6, 0))
+end
+
+-- 풍선 클러스터: 무게추 + 풍선 4개
+local function buildBalloonCluster(cf: CFrame, parent: Instance, colA: Color3, colB: Color3, rng: Random)
+	box(parent, 2, 1.2, 2, Color3.fromRGB(120, 124, 136), SP, cf * CFrame.new(0, 0.6, 0))
+	for i = 1, 4 do
+		local d = rng:NextNumber(2.4, 3.4)
+		local h = rng:NextNumber(8, 13)
+		local col = (i % 2 == 0) and colA or colB
+		ball(
+			parent,
+			d,
+			col,
+			SP,
+			cf * CFrame.new(rng:NextNumber(-1.8, 1.8), h, rng:NextNumber(-1.8, 1.8))
+		)
+	end
+end
+
+-- 조명탑: 높은 기둥 + 네온 헤드 + 도로를 비추는 SpotLight (어두운 테마의 야간 경기장 느낌)
+local function buildFloodlight(cf: CFrame, parent: Instance)
+	local h = 30
+	vcyl(parent, h, 1.6, Color3.fromRGB(70, 74, 86), SP, cf)
+	local head = box(parent, 6, 3, 1.2, Color3.fromRGB(255, 250, 220), NEON, cf * CFrame.new(0, h + 1.5, -1) * CFrame.Angles(math.rad(-32), 0, 0))
+	local sl = Instance.new("SpotLight")
+	sl.Face = Enum.NormalId.Front
+	sl.Angle = 70
+	sl.Range = 60
+	sl.Brightness = 1.6
+	sl.Color = Color3.fromRGB(255, 248, 224)
+	sl.Parent = head
+end
+
+-- =====================================================================
 -- 공개 API
 -- =====================================================================
 
@@ -832,6 +1036,71 @@ function TrackGenerator.build(index: number, parent: Instance?): TrackInfo
 		local key = props[((i - 1) % #props) + 1]
 		local builder = PROP_BUILDERS[key] or PROP_BUILDERS.cone
 		builder(cf, decorFolder, theme)
+	end
+
+	-- ───────── 레이싱 분위기 연출물 (게이트/관중석/광고판/깃발/풍선/조명탑) ─────────
+	local atmosFolder = Instance.new("Folder")
+	atmosFolder.Name = "Atmosphere"
+	atmosFolder.Parent = model
+
+	buildStartGate(startLook, atmosFolder, pal)
+
+	-- 트랙 질량중심(XZ) — "바깥쪽" 방향 판정용
+	local centerX, centerZ = 0, 0
+	for _, p in ipairs(nodes) do
+		centerX += p.X
+		centerZ += p.Z
+	end
+	centerX /= #nodes
+	centerZ /= #nodes
+
+	-- 경로 진행률(frac 0~1) 지점에서 트랙 바깥으로 dist만큼 떨어져 도로를 바라보는 수평 CFrame
+	local function outwardCFrameAt(frac: number, dist: number): CFrame
+		local i = math.clamp(math.floor(#path * frac) + 1, 1, #path)
+		local p = path[i]
+		local out = Vector3.new(p.X - centerX, 0, p.Z - centerZ)
+		out = if out.Magnitude > 0.01 then out.Unit else Vector3.new(1, 0, 0)
+		local pos = p + out * dist
+		return CFrame.lookAt(pos, Vector3.new(p.X, pos.Y, p.Z))
+	end
+
+	local decorA: Color3 = (theme and theme.decorA) or Color3.fromRGB(255, 120, 120)
+	local decorB: Color3 = (theme and theme.decorB) or Color3.fromRGB(120, 180, 255)
+
+	-- 관중석 2곳: 출발선 옆(홈스트레이트) + 반대편
+	buildGrandstand(outwardCFrameAt(0.015, ROAD_WIDTH / 2 + 17), atmosFolder, decorA, decorB, rng)
+	buildGrandstand(outwardCFrameAt(0.48, ROAD_WIDTH / 2 + 17), atmosFolder, decorA, decorB, rng)
+
+	-- 광고판 6개: 테마 이모지를 섞은 코믹 문구
+	local emoji = (theme and theme.emoji) or "🏁"
+	local adTexts = {
+		"BOOST!",
+		emoji .. " GO! GO!",
+		"★ TURBO ★",
+		"SPEED UP",
+		emoji .. " RACING",
+		"DRIFT!",
+	}
+	for i, frac in ipairs({ 0.1, 0.27, 0.4, 0.58, 0.72, 0.88 }) do
+		local boardCol = (i % 2 == 0) and decorA or decorB
+		buildAdBoard(outwardCFrameAt(frac, ROAD_WIDTH / 2 + 9), atmosFolder, adTexts[i], boardCol, Color3.fromRGB(255, 255, 255))
+	end
+
+	-- 깃발 기둥 6개 + 풍선 클러스터 4곳
+	for _, frac in ipairs({ 0.06, 0.2, 0.34, 0.52, 0.66, 0.8 }) do
+		buildFlagPole(outwardCFrameAt(frac, ROAD_WIDTH / 2 + 6), atmosFolder, decorA, decorB)
+	end
+	for _, frac in ipairs({ 0.04, 0.3, 0.55, 0.78 }) do
+		buildBalloonCluster(outwardCFrameAt(frac, ROAD_WIDTH / 2 + 12), atmosFolder, decorA, decorB, rng)
+	end
+
+	-- 어두운 테마(저녁/밤 분위기)는 조명탑 4곳으로 야간 경기장 연출
+	local tl = theme and theme.lighting
+	local isDark = tl ~= nil and (tl.clockTime < 8 or tl.clockTime > 17 or tl.brightness <= 1.8)
+	if isDark then
+		for _, frac in ipairs({ 0.12, 0.38, 0.62, 0.86 }) do
+			buildFloodlight(outwardCFrameAt(frac, ROAD_WIDTH / 2 + 10), atmosFolder)
+		end
 	end
 
 	-- ───────── 미니맵용 외곽선 & 바운드 ─────────

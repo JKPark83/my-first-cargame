@@ -59,7 +59,79 @@ local function makePart(parent: Instance, props: { [string]: any }): Part
 	return p
 end
 
--- 레이싱장 분위기 장식 일체 (출발 아치 / 관중석 / 조명탑 / 배너 / 체커라인 / 타이어더미)
+-- 파트 면에 텍스트 SurfaceGui 부착 (시상대 숫자/피트 간판용)
+local function addFaceText(part: BasePart, face: Enum.NormalId, text: string, color: Color3)
+	local sg = Instance.new("SurfaceGui")
+	sg.Face = face
+	sg.CanvasSize = Vector2.new(240, 240)
+	sg.Parent = part
+	local lbl = Instance.new("TextLabel")
+	lbl.Size = UDim2.fromScale(1, 1)
+	lbl.BackgroundTransparency = 1
+	lbl.Font = Enum.Font.GothamBlack
+	lbl.Text = text
+	lbl.TextColor3 = color
+	lbl.TextStrokeColor3 = Color3.fromRGB(20, 20, 20)
+	lbl.TextStrokeTransparency = 0.5
+	lbl.TextScaled = true
+	lbl.Parent = sg
+end
+
+-- 두 지점 사이에 살짝 처지는 페넌트(작은 깃발) 줄 — 축제 분위기
+local function buildPennantLine(folder: Folder, from: Vector3, to: Vector3, colA: Color3, colB: Color3)
+	local n = 10
+	local dir = to - from
+	local flat = Vector3.new(dir.X, 0, dir.Z)
+	for i = 1, n do
+		local t = i / (n + 1)
+		local sag = -24 * t * (1 - t) -- 가운데가 최대 6 스터드 처짐
+		local pos = from + dir * t + Vector3.new(0, sag, 0)
+		local look = if flat.Magnitude > 0.01 then CFrame.lookAt(pos, pos + flat.Unit) else CFrame.new(pos)
+		makePart(folder, {
+			Name = "Pennant",
+			Size = Vector3.new(0.25, 2.2, 1.6), -- 줄 방향으로 나란히 걸린 얇은 깃발
+			CFrame = look,
+			Material = Enum.Material.SmoothPlastic,
+			Color = (i % 2 == 0) and colA or colB,
+		})
+	end
+end
+
+-- 풍선 클러스터 (무게추 + 풍선 4개, 고정 배치라 재현 가능)
+local BALLOON_OFFSETS = {
+	{ Vector3.new(-1.5, 9, 0.8), 2.6 },
+	{ Vector3.new(1.4, 11, -0.6), 3.0 },
+	{ Vector3.new(0.2, 12.5, 1.2), 2.4 },
+	{ Vector3.new(-0.8, 10, -1.4), 3.2 },
+}
+local BALLOON_COLORS = {
+	Color3.fromRGB(255, 105, 120),
+	Color3.fromRGB(255, 210, 80),
+	Color3.fromRGB(110, 210, 255),
+	Color3.fromRGB(150, 235, 130),
+}
+local function buildBalloonCluster(folder: Folder, base: Vector3)
+	makePart(folder, {
+		Name = "BalloonWeight",
+		Size = Vector3.new(2, 1.2, 2),
+		Position = base + Vector3.new(0, 1.6, 0),
+		Material = Enum.Material.SmoothPlastic,
+		Color = Color3.fromRGB(120, 124, 136),
+	})
+	for i, def in ipairs(BALLOON_OFFSETS) do
+		makePart(folder, {
+			Name = "Balloon",
+			Shape = Enum.PartType.Ball,
+			Size = Vector3.new(def[2], def[2], def[2]),
+			Position = base + def[1],
+			Material = Enum.Material.SmoothPlastic,
+			Color = BALLOON_COLORS[i],
+		})
+	end
+end
+
+-- 레이싱장 분위기 장식 일체 (출발 아치 / 관중석 / 조명탑 / 배너 / 체커라인 / 타이어더미
+--  / 페넌트 줄 / 시상대 / 피트 개러지 / 풍선)
 -- 하드 제약: |offset| < 78(벽 안쪽면), 바닥 위 파트의 하단 Y >= 1(바닥 윗면).
 local function buildDecorations(folder: Folder)
 	if not GameConfig.Lobby.showDecorations then
@@ -137,6 +209,93 @@ local function buildDecorations(folder: Folder)
 			})
 		end
 	end
+
+	-- 페넌트 줄 ×4: 아치 기둥 꼭대기 ↔ 조명탑 꼭대기 (로비 상공을 가로지르는 축제 분위기)
+	local pennA = Color3.fromRGB(255, 110, 120)
+	local pennB = Color3.fromRGB(255, 220, 90)
+	buildPennantLine(folder, O + Vector3.new(-22, 24, archZ), O + Vector3.new(-70, 28, -70), pennA, pennB)
+	buildPennantLine(folder, O + Vector3.new(22, 24, archZ), O + Vector3.new(70, 28, -70), pennB, pennA)
+	buildPennantLine(folder, O + Vector3.new(-22, 24, archZ), O + Vector3.new(-70, 28, 70), pennB, pennA)
+	buildPennantLine(folder, O + Vector3.new(22, 24, archZ), O + Vector3.new(70, 28, 70), pennA, pennB)
+
+	-- 시상대 (전광판 앞, 1·2·3위 단상 — 올라가 볼 수 있음)
+	local podiumDefs = {
+		{ x = 0, h = 7, color = Color3.fromRGB(255, 215, 80), label = "1" }, -- 금
+		{ x = -9, h = 5, color = Color3.fromRGB(205, 210, 220), label = "2" }, -- 은
+		{ x = 9, h = 3.5, color = Color3.fromRGB(205, 130, 70), label = "3" }, -- 동
+	}
+	for _, d in ipairs(podiumDefs) do
+		local step = makePart(folder, {
+			Name = "Podium" .. d.label,
+			Size = Vector3.new(8, d.h, 8),
+			Position = O + Vector3.new(d.x, 1 + d.h / 2, -60),
+			Material = Enum.Material.SmoothPlastic,
+			Color = d.color,
+			CanCollide = true,
+		})
+		-- 숫자는 로비 중앙(남쪽) 방향(+Z = Back 면)에서 보인다
+		addFaceText(step, Enum.NormalId.Back, d.label, Color3.fromRGB(40, 34, 12))
+	end
+
+	-- 피트 개러지 (동쪽 벽 앞: 기둥+지붕+간판+드럼통/공구상자)
+	local pitX, pitZ = 64, -35
+	for _, dz in ipairs({ -9, 9 }) do
+		makePart(folder, {
+			Name = "PitPillar",
+			Size = Vector3.new(1.6, 12, 1.6),
+			Position = O + Vector3.new(pitX - 11, 7, pitZ + dz),
+			Material = Enum.Material.SmoothPlastic,
+			Color = Color3.fromRGB(80, 82, 90),
+			CanCollide = true,
+		})
+	end
+	makePart(folder, { -- 지붕(체커 스트라이프 2톤)
+		Name = "PitRoof",
+		Size = Vector3.new(26, 1.2, 22),
+		Position = O + Vector3.new(pitX, 13.6, pitZ),
+		Material = Enum.Material.SmoothPlastic,
+		Color = Color3.fromRGB(220, 70, 70),
+	})
+	makePart(folder, {
+		Name = "PitRoofStripe",
+		Size = Vector3.new(26, 1.3, 5),
+		Position = O + Vector3.new(pitX, 13.65, pitZ),
+		Material = Enum.Material.SmoothPlastic,
+		Color = Color3.fromRGB(245, 245, 245),
+	})
+	local pitSign = makePart(folder, {
+		Name = "PitSign",
+		Size = Vector3.new(0.6, 3.5, 14),
+		Position = O + Vector3.new(pitX - 12.5, 12, pitZ),
+		Material = Enum.Material.SmoothPlastic,
+		Color = Color3.fromRGB(28, 30, 40),
+	})
+	addFaceText(pitSign, Enum.NormalId.Left, "🔧 PIT STOP", Color3.fromRGB(255, 220, 80)) -- 로비 중앙(-X)을 향한 면
+	for i, dz in ipairs({ -7, -2.5, 3 }) do -- 드럼통 3개
+		makePart(folder, {
+			Name = "PitDrum",
+			Shape = Enum.PartType.Cylinder,
+			Size = Vector3.new(4, 3, 3),
+			CFrame = CFrame.new(O + Vector3.new(pitX + 6, 3, pitZ + dz)) * CFrame.Angles(0, 0, math.rad(90)),
+			Material = Enum.Material.SmoothPlastic,
+			Color = (i % 2 == 0) and Color3.fromRGB(220, 90, 60) or Color3.fromRGB(90, 130, 220),
+			CanCollide = true,
+		})
+	end
+	makePart(folder, { -- 공구 상자
+		Name = "PitToolbox",
+		Size = Vector3.new(5, 3, 3),
+		Position = O + Vector3.new(pitX + 4, 2.5, pitZ + 8),
+		Material = Enum.Material.SmoothPlastic,
+		Color = Color3.fromRGB(230, 60, 60),
+		CanCollide = true,
+	})
+
+	-- 풍선 클러스터 ×4 (아치 양옆 + 시상대 양옆)
+	buildBalloonCluster(folder, O + Vector3.new(-30, 0, 8))
+	buildBalloonCluster(folder, O + Vector3.new(30, 0, 8))
+	buildBalloonCluster(folder, O + Vector3.new(-32, 0, -62))
+	buildBalloonCluster(folder, O + Vector3.new(32, 0, -62))
 end
 
 -- 경주 참가 패드 위 3D 체커 깃발 (깃대 + 깃발천 + 양면 체커 SurfaceGui)
